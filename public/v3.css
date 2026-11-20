@@ -1,0 +1,778 @@
+/* ============================================================
+   V3.0 样式：缩略图 / 勾选打包 / 分享直链 / 分片上传进度 /
+   工具箱（回收站 · 日志 · 磁盘监控 · 定时清理 · 扫码）/ 移动端
+   与 styles.css 的浅色主题变量保持一致
+   ============================================================ */
+
+/* ---------- 文件项：勾选框 + 缩略图 ---------- */
+.file-item {
+  grid-template-columns: auto 66px minmax(0, 1fr) auto;
+}
+
+.v3-pick-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  flex: 0 0 24px;
+  cursor: pointer;
+  position: relative;
+}
+
+.v3-pick-wrap input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+
+.v3-pick-box {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  border: 1.5px solid #cbd5e1;
+  background: #fff;
+  transition: background 0.16s, border-color 0.16s;
+  position: relative;
+}
+
+.v3-pick-wrap input:checked + .v3-pick-box {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+.v3-pick-wrap input:checked + .v3-pick-box::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.v3-pick-wrap input:focus-visible + .v3-pick-box {
+  outline: 2px solid rgba(79, 70, 229, 0.35);
+  outline-offset: 2px;
+}
+
+.file-thumb {
+  width: 62px;
+  height: 44px;
+  border-radius: 9px;
+  overflow: hidden;
+  position: relative;
+  background: #eef2f9;
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  color: #97a2b8;
+  user-select: none;
+}
+
+/* 缩略图本体不参与 hover / active 视觉反馈：边框、描边、阴影一律保持不变，
+   交互动效只发生在右下角 ▶ 角标上 */
+.file-thumb:hover,
+.file-thumb:active {
+  border-color: var(--border);
+  box-shadow: none;
+  outline: none;
+}
+
+/* 媒体缩略图静态占位（不做浏览器抽帧）：与安装包 FILE 占位同一形态，靠图标与底色区分类型 */
+.file-thumb.is-media-icon {
+  font-size: 17px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: #4f46e5;
+  background: #eef1ff;
+  transition: none;
+}
+
+.file-thumb.is-media-audio {
+  color: #0f9488;
+  background: #e9f7f4;
+}
+
+.file-thumb img,
+.file-thumb video,
+.file-thumb canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.file-thumb.is-video::after {
+  content: "▶";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: #fff;
+  background: rgba(15, 23, 42, 0.28);
+  pointer-events: none;
+  transform: scale(1);
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+  will-change: transform;
+}
+
+/* 成功态（缓存命中 / canvas 抽帧成功 / audio）：真实画面不叠加深色遮罩，仅右下角小 ▶ 角标 */
+.file-thumb.is-video-ok::after {
+  content: "▶";
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  inset: auto 3px 2px auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  font-size: 8px;
+  line-height: 1;
+  color: #fff;
+  background: rgba(15, 23, 42, 0.5);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
+  pointer-events: none;
+  transform: scale(1);
+  transform-origin: 50% 50%;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+    background 0.18s ease;
+  will-change: transform;
+}
+
+/* ▶ 角标交互动效：
+   悬停 —— 角标放大到 1.3 倍并轻微上浮，阻尼缓动带回弹；
+   按下 —— 角标回缩做按压反馈；
+   缩略图本体（含内外边框 / 描边 / 阴影）全程不参与任何 hover、active 动效。 */
+.file-thumb.is-video-ok:hover::after {
+  transform: translateY(-2px) scale(1.3);
+  background: rgba(15, 23, 42, 0.74);
+}
+
+.file-thumb.is-video-ok:active::after {
+  transform: translateY(0) scale(0.92);
+  transition-duration: 0.07s;
+}
+
+/* 降级态的居中 ▶ 同步用同一套动效，幅度略小以免糊住占位块 */
+.file-thumb.is-video:hover::after {
+  transform: scale(1.16);
+}
+
+.file-thumb.is-video:active::after {
+  transform: scale(0.94);
+  transition-duration: 0.07s;
+}
+
+.file-thumb.is-loading::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, #eef2f9 25%, #f7f9fd 50%, #eef2f9 75%);
+  background-size: 200% 100%;
+  animation: v3Shimmer 1.1s linear infinite;
+}
+
+@keyframes v3Shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+/* ---------- 勾选工具条 ---------- */
+.v3-select-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border: 1px dashed #d8deea;
+  border-radius: 12px;
+  background: #f8fafd;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.v3-select-bar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.v3-select-bar input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.v3-selected-count {
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.v3-hint {
+  margin-left: auto;
+  font-size: 12px;
+  color: #9aa4b8;
+}
+
+.v3-select-bar .btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---------- 上传进度 / 分片续传 ---------- */
+.v3-upload-card {
+  margin-top: 16px;
+}
+
+.v3-upload-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.v3-upload-hint {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.v3-upload-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.v3-upload-list:empty {
+  margin-top: 0;
+}
+
+.v3-upload-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: #fff;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.v3-upload-item.is-done {
+  border-color: #bbf7d0;
+  background: #f6fdf9;
+}
+
+.v3-upload-item.is-error {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.v3-upload-item.is-paused {
+  border-color: #fde68a;
+  background: #fffdf5;
+}
+
+.v3-upload-item-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.v3-upload-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.v3-upload-item-state {
+  color: var(--muted);
+  font-size: 12.5px;
+  flex: 0 0 auto;
+}
+
+.v3-upload-item-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+}
+
+.v3-progress {
+  margin-top: 8px;
+  height: 6px;
+  border-radius: 999px;
+  background: #eef2f9;
+  overflow: hidden;
+}
+
+.v3-progress span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #4f46e5);
+  transition: width 0.18s ease;
+}
+
+.v3-upload-item.is-done .v3-progress span {
+  background: linear-gradient(90deg, #22c55e, #16a34a);
+}
+
+.v3-upload-item.is-error .v3-progress span {
+  background: linear-gradient(90deg, #f87171, #dc2626);
+}
+
+.v3-upload-overall {
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--muted);
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #f6f8fc;
+}
+
+#dropZone.is-dragover {
+  border-color: var(--primary);
+  background: #f2f4ff;
+}
+
+/* ---------- 工具箱：标签页 ---------- */
+.v3-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 14px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.v3-tab {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 7px 16px;
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: all 0.18s var(--ease);
+}
+
+.v3-tab:hover {
+  border-color: #c7d2fe;
+  color: var(--primary);
+}
+
+.v3-tab.is-active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(79, 70, 229, 0.22);
+}
+
+.v3-panel {
+  display: none;
+}
+
+.v3-panel.is-active {
+  display: block;
+  animation: v3Fade 0.24s var(--ease) both;
+}
+
+@keyframes v3Fade {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.v3-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.v3-panel-title {
+  font-weight: 600;
+  font-size: 14.5px;
+}
+
+.v3-panel-sub {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.v3-spacer {
+  flex: 1;
+}
+
+.v3-list {
+  display: grid;
+  gap: 8px;
+}
+
+.v3-list:empty {
+  display: none;
+}
+
+.v3-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: #fff;
+  font-size: 13px;
+  transition: border-color 0.16s, background 0.16s;
+}
+
+.v3-row:hover {
+  border-color: #c7d2fe;
+  background: #fbfcff;
+}
+
+.v3-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.v3-row-name {
+  font-weight: 500;
+  word-break: break-all;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.v3-row-meta {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.v3-empty {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 20px 8px;
+  text-align: center;
+  border: 1px dashed #dfe4ee;
+  border-radius: 11px;
+  background: #fafbfe;
+}
+
+.v3-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #eef2ff;
+  color: #4338ca;
+  flex: 0 0 auto;
+}
+
+.v3-badge.is-upload { background: #ecfdf5; color: #047857; }
+.v3-badge.is-download { background: #eff6ff; color: #1d4ed8; }
+.v3-badge.is-delete { background: #fef2f2; color: #b91c1c; }
+.v3-badge.is-cleanup { background: #fffbeb; color: #b45309; }
+.v3-badge.is-share { background: #f5f3ff; color: #6d28d9; }
+
+/* ---------- 磁盘与清理 ---------- */
+.v3-disk {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fbfcff;
+}
+
+.v3-disk-bar {
+  height: 12px;
+  border-radius: 999px;
+  background: #e8edf6;
+  overflow: hidden;
+}
+
+.v3-disk-bar span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #4f46e5);
+  transition: width 0.3s var(--ease);
+}
+
+.v3-disk-bar.is-warn span {
+  background: linear-gradient(90deg, #fbbf24, #f59e0b);
+}
+
+.v3-disk-bar.is-danger span {
+  background: linear-gradient(90deg, #f87171, #dc2626);
+}
+
+.v3-disk-legend {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.v3-form-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.v3-form-row input[type="number"] {
+  width: 74px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.v3-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.v3-switch input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+/* ---------- 二维码与分享 ---------- */
+.v3-qr-box {
+  display: flex;
+  gap: 22px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fbfcff;
+}
+
+.v3-qr-card {
+  width: 176px;
+  height: 176px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 176px;
+}
+
+.v3-qr-card img {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.v3-qr-side {
+  flex: 1;
+  min-width: 200px;
+  font-size: 13px;
+}
+
+/* ---------- 弹层 ---------- */
+.v3-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: v3Fade 0.2s ease both;
+}
+
+.v3-modal {
+  width: min(480px, 100%);
+  background: #fff;
+  border-radius: 16px;
+  padding: 22px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.28);
+  max-height: 88vh;
+  overflow: auto;
+}
+
+.v3-modal h3 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.v3-modal-tip {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.v3-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.v3-field select {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #fff;
+  font-size: 13px;
+}
+
+.v3-modal-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.v3-link-result {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f6f8fc;
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+  word-break: break-all;
+  color: var(--primary-dark);
+}
+
+/* ---------- 移动端适配 ---------- */
+@media (max-width: 640px) {
+  .file-item {
+    grid-template-columns: auto 56px minmax(0, 1fr);
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .file-thumb {
+    width: 52px;
+    height: 40px;
+  }
+
+  .file-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .v3-select-bar {
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .v3-hint {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+
+  .v3-select-bar .btn {
+    flex: 1 1 auto;
+  }
+
+  .v3-modal {
+    padding: 18px;
+  }
+
+  .v3-modal-actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .v3-qr-box {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .v3-qr-card {
+    width: 150px;
+    height: 150px;
+    flex: 0 0 150px;
+  }
+
+  .v3-row {
+    flex-wrap: wrap;
+  }
+
+  .v3-row .btn {
+    flex: 0 0 auto;
+  }
+
+  .v3-upload-item-head {
+    flex-wrap: wrap;
+  }
+
+  .v3-upload-item-name {
+    flex: 1 1 100%;
+  }
+
+  .v3-tabs {
+    gap: 6px;
+  }
+
+  .v3-tab {
+    padding: 6px 12px;
+    font-size: 13px;
+  }
+
+  .v3-form-row {
+    gap: 10px;
+  }
+
+  .v3-disk-legend {
+    flex-direction: column;
+    gap: 6px;
+  }
+}
+
+@media (max-width: 420px) {
+  .v3-pick-wrap {
+    width: 20px;
+    flex-basis: 20px;
+  }
+
+  .v3-upload-actions .btn {
+    flex: 1 1 auto;
+  }
+}

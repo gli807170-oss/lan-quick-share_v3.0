@@ -1,0 +1,7 @@
+{
+  "port": 9988,
+  "host": "0.0.0.0",
+  "maxFileSizeGB": 20,
+  "sessionTtlHours": 12,
+  "passwordSha256": "e4339e761261c995b73b91d0d00cc8137d80a226c730fc72e19a35547a4b91f3"
+}
