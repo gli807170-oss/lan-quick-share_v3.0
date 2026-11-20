@@ -53,6 +53,10 @@ function writeJson(file, value) {
   }
 }
 
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key)
+}
+
 // ---------- 路径安全 ----------
 function normalizeRel(input) {
   const raw = String(input || '').replace(/\\/g, '/')
@@ -291,7 +295,7 @@ function writeTrashIndex(list) {
   writeJson(trashIndexPath(), list)
 }
 
-export function moveToTrash(req, relInput, reason = 'manual') {
+export async function moveToTrash(req, relInput, reason = 'manual') {
   const rel = normalizeRel(relInput)
   if (!rel) return { ok: false, error: '非法文件名' }
   const abs = resolveInUpload(rel)
@@ -304,21 +308,25 @@ export function moveToTrash(req, relInput, reason = 'manual') {
   const stored = path.join(dir, base)
   try {
     fs.renameSync(abs, stored)
-  } catch {
+  } catch (renameError) {
+    // 跨盘或权限导致的 rename 失败：先完整复制，再删除源文件，全部成功后才写索引
     try {
-      fsp.cp(abs, stored, { recursive: true }).then(() => fsp.rm(abs, { recursive: true, force: true }))
+      await fsp.cp(abs, stored, { recursive: true })
+      await fsp.rm(abs, { recursive: true, force: true })
     } catch (error) {
-      return { ok: false, error: `移入回收站失败：${error.message}` }
+      try { await fsp.rm(stored, { recursive: true, force: true }) } catch {}
+      return { ok: false, error: `移入回收站失败：${error.message || renameError.message}` }
     }
   }
 
   const stat = fs.existsSync(stored) ? fs.statSync(stored) : null
+  if (!stat) return { ok: false, error: '移入回收站失败：目标文件不存在' }
   const item = {
     id,
     name: rel,
     base,
-    size: stat ? (stat.isDirectory() ? 0 : stat.size) : 0,
-    isDir: Boolean(stat?.isDirectory()),
+    size: stat.isDirectory() ? 0 : stat.size,
+    isDir: stat.isDirectory(),
     deletedAt: Date.now(),
     stored: path.join('items', id, base),
     ip: clientIp(req),
@@ -439,8 +447,9 @@ function createShare(rel, ttlHours) {
 function resolveShare(token) {
   if (!token) return null
   const shares = readShares()
+  if (!hasOwn(shares, token)) return null
   const item = shares[token]
-  if (!item) return null
+  if (!item || typeof item !== 'object') return null
   if (item.expiresAt && item.expiresAt <= Date.now()) return null
   return item
 }
@@ -450,13 +459,17 @@ function bumpShareHit(req, token) {
   if (!token) return false
   if (isSegmentRequest(req)) return false
   if (!dedupeCount(shareHitSeen, `${clientIp(req)}|${token}`)) return false
+  let opened = null
   mutateShares(shares => {
+    if (!hasOwn(shares, token)) return
     const item = shares[token]
-    if (!item) return
+    if (!item || typeof item !== 'object') return
     item.hits = Number(item.hits || 0) + 1
     item.lastHitAt = Date.now()
+    opened = item
   })
-  return true
+  if (opened) logAction(req, 'share-open', { token, name: opened.name })
+  return Boolean(opened)
 }
 
 // ---------- 定时清理状态 ----------
@@ -498,14 +511,18 @@ function cleanupCandidates(days) {
     .sort((a, b) => a.lastAccessAt - b.lastAccessAt)
 }
 
-function runCleanup(req, days, reason = 'auto-clean') {
+async function runCleanup(req, days, reason = 'auto-clean') {
   const rows = cleanupCandidates(days)
   const moved = []
   const failed = []
   for (const row of rows) {
-    const result = moveToTrash(req, row.name, reason)
-    if (result.ok) moved.push({ name: row.name, size: row.size })
-    else failed.push({ name: row.name, error: result.error })
+    try {
+      const result = await moveToTrash(req, row.name, reason)
+      if (result.ok) moved.push({ name: row.name, size: row.size })
+      else failed.push({ name: row.name, error: result.error })
+    } catch (error) {
+      failed.push({ name: row.name, error: error.message || '清理失败' })
+    }
   }
   logAction(req, 'cleanup', { days: Number(days) || 30, moved: moved.length, failed: failed.length, reason })
   const state = readState()
@@ -516,13 +533,13 @@ function runCleanup(req, days, reason = 'auto-clean') {
 }
 
 function startCleanupScheduler() {
-  const run = () => {
+  const run = async () => {
     try {
       const state = readState()
       const conf = state.autoClean
       if (!conf.enabled) return
       if (Date.now() - conf.lastRunAt < conf.intervalHours * 3600 * 1000) return
-      runCleanup({ socket: { remoteAddress: '::1' } }, conf.days, 'auto-clean')
+      await runCleanup({ socket: { remoteAddress: '::1' } }, conf.days, 'auto-clean')
       flushAccessMap()
     } catch (error) {
       console.warn('[v3] 定时清理失败：', error.message)
@@ -797,8 +814,9 @@ export function attachV3(app, options) {
   api.delete('/shares/:token', (req, res) => {
     const token = String(req.params.token || '')
     const removed = mutateShares(shares => {
+      if (!hasOwn(shares, token)) return null
       const item = shares[token]
-      if (!item) return null
+      if (!item || typeof item !== 'object') return null
       delete shares[token]
       return item
     })
@@ -848,12 +866,13 @@ export function attachV3(app, options) {
     res.json({ ok: failed.length === 0, restored, failed })
   })
 
-  api.post('/trash/purge', (req, res) => {
+  api.post('/trash/purge', async (req, res) => {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : []
     if (!ids.length) return res.status(400).json({ message: '未选择要彻底删除的项目' })
     const list = readTrashIndex()
     const purged = []
     const remain = []
+    const failed = []
     for (const item of list) {
       if (!ids.includes(item.id)) {
         remain.push(item)
@@ -861,24 +880,34 @@ export function attachV3(app, options) {
       }
       const stored = path.join(CTX.trashDir, item.stored)
       try {
-        fsp.rm(stored, { recursive: true, force: true }).catch(() => {})
+        await fsp.rm(stored, { recursive: true, force: true })
         purged.push(item.id)
         logAction(req, 'purge', { name: item.name })
-      } catch {}
+      } catch (error) {
+        failed.push({ id: item.id, error: error.message || '删除失败' })
+        remain.push(item)
+      }
     }
     writeTrashIndex(remain)
-    res.json({ ok: true, purged, remaining: remain.length })
+    res.json({ ok: failed.length === 0, purged, remaining: remain.length, failed })
   })
 
-  api.delete('/trash', (req, res) => {
+  api.delete('/trash', async (req, res) => {
     const list = readTrashIndex()
+    const remain = []
+    const failed = []
     for (const item of list) {
       const stored = path.join(CTX.trashDir, item.stored)
-      fsp.rm(stored, { recursive: true, force: true }).catch(() => {})
+      try {
+        await fsp.rm(stored, { recursive: true, force: true })
+      } catch (error) {
+        failed.push({ id: item.id, error: error.message || '删除失败' })
+        remain.push(item)
+      }
     }
-    writeTrashIndex([])
-    logAction(req, 'trash-empty', { count: list.length })
-    res.json({ ok: true, cleared: list.length })
+    writeTrashIndex(remain)
+    logAction(req, 'trash-empty', { count: list.length - remain.length })
+    res.json({ ok: failed.length === 0, cleared: list.length - remain.length, failed })
   })
 
   // ---- 操作日志 ----
@@ -926,11 +955,15 @@ export function attachV3(app, options) {
     })
   })
 
-  api.post('/cleanup/run', (req, res) => {
+  api.post('/cleanup/run', async (req, res) => {
     const state = readState()
     const days = Number(req.body?.days) || state.autoClean.days
-    const result = runCleanup(req, days, 'manual-clean')
-    res.json({ ok: true, days, moved: result.moved.length, failed: result.failed.length, items: result.moved, failures: result.failed })
+    try {
+      const result = await runCleanup(req, days, 'manual-clean')
+      res.json({ ok: true, days, moved: result.moved.length, failed: result.failed.length, items: result.moved, failures: result.failed })
+    } catch (error) {
+      res.status(500).json({ message: error.message || '清理失败' })
+    }
   })
 
   // ---- 分片上传 / 断点续传 ----
@@ -940,11 +973,12 @@ export function attachV3(app, options) {
     if (!(size > 0)) return res.status(400).json({ message: '文件大小无效' })
     if (size > CTX.maxFileSize) { return res.status(413).json({ message: `单个文件不能超过 ${CTX.formatLimit(CTX.maxFileSize)}` }) }
     const dir = normalizeDir(req.body?.relativePath)
-    const lastModified = Number(req.body?.lastModified || 0)
-    const id = crypto.createHash('sha1').update(`${dir}|${name}|${size}|${lastModified}`).digest('hex').slice(0, 32)
+    // 仅靠名字/大小/修改时间会碰撞并串档；加入浏览器随机盐和内容采样指纹
+    const fingerprint = String(req.body?.fingerprint || '').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 96)
+    const id = crypto.createHash('sha1').update(`${fingerprint}|${dir}|${name}|${size}`).digest('hex').slice(0, 32)
     const metaPath = uploadJsonPath(id)
     let meta = readJson(metaPath, null)
-    if (!meta || meta.size !== size) {
+    if (!meta || meta.size !== size || meta.name !== name || meta.dir !== dir) {
       meta = { id, name, size, dir, createdAt: Date.now() }
       writeJson(metaPath, meta)
       try { fs.writeFileSync(uploadPartPath(id), '') } catch {}
@@ -955,7 +989,7 @@ export function attachV3(app, options) {
     res.json({ uploadId: id, chunkSize: CHUNK_SIZE, received, size, resumed: received > 0, name, dir })
   })
 
-  api.post('/upload/chunk', express.raw({ type: () => true, limit: '256mb' }), (req, res) => {
+  api.post('/upload/chunk', express.raw({ type: () => true, limit: '16mb' }), async (req, res) => {
     req.setTimeout(0)
     const id = String(req.headers['x-upload-id'] || '')
     const meta = readUploadMeta(id)
@@ -969,7 +1003,11 @@ export function attachV3(app, options) {
     const buffer = req.body
     if (!Buffer.isBuffer(buffer) || !buffer.length) return res.status(400).json({ message: '分片内容为空' })
     if (current + buffer.length > meta.size) return res.status(413).json({ message: '分片超出文件大小' })
-    fs.appendFileSync(partPath, buffer)
+    try {
+      await fsp.appendFile(partPath, buffer)
+    } catch (error) {
+      return res.status(500).json({ message: error.message || '分片写入失败' })
+    }
     res.json({ received: current + buffer.length, size: meta.size })
   })
 

@@ -83,7 +83,7 @@
     currentView: 'home'
   }
 
-  const sharedTextState = { dirty: false, lastLoaded: '', loading: false, saving: false }
+  const sharedTextState = { dirty: false, lastLoaded: '', loading: false, saving: false, requestId: 0 }
 
   // ---------------- 通用工具 ----------------
   function formatBytes(bytes) {
@@ -179,6 +179,13 @@
     }
     return response
   }
+
+  // V3 工具箱等模块通过事件上报 401，统一回到这里处理登录态
+  document.addEventListener('app:unauthorized', () => {
+    if (!state.authed) return
+    setAuth(false)
+    openAuth(state.currentView)
+  })
 
   // ---------------- 门禁 ----------------
   function setAuth(authed) {
@@ -449,6 +456,9 @@
 
     if (!list.length) {
       els.fileList.innerHTML = '<div class="empty">暂无符合条件的文件</div>'
+      if (typeof window.__v3PruneSelection === 'function') {
+        window.__v3PruneSelection(state.files.map(file => file.name))
+      }
       return
     }
 
@@ -514,6 +524,9 @@
 
       els.fileList.appendChild(item)
     })
+    if (typeof window.__v3PruneSelection === 'function') {
+      window.__v3PruneSelection(state.files.map(file => file.name))
+    }
   }
 
   // 列表数据指纹：用于判断轮询返回的数据是否真的变化，避免无变动时反复重建行
@@ -670,12 +683,15 @@
   async function loadSharedText(force = false) {
     if (!state.authed || sharedTextState.loading) return
     if (!force && (sharedTextState.dirty || document.activeElement === els.sharedText)) return
+    const requestId = ++sharedTextState.requestId
     sharedTextState.loading = true
     try {
       const response = await api('/api/shared-text')
       if (!response.ok) throw new Error('读取失败')
       const data = await response.json()
       const text = data.text || ''
+      // 请求期间用户可能已输入或保存，过期响应一律丢弃，不能覆盖编辑框
+      if (requestId !== sharedTextState.requestId || sharedTextState.dirty || document.activeElement === els.sharedText) return
       if (text !== sharedTextState.lastLoaded) {
         sharedTextState.lastLoaded = text
         els.sharedText.value = text
@@ -707,9 +723,11 @@
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data.message || '保存失败')
+      sharedTextState.requestId += 1
       sharedTextState.lastLoaded = text
-      sharedTextState.dirty = false
-      setSharedTextStatus('已保存', 'done')
+      const changedWhileSaving = els.sharedText.value !== text
+      sharedTextState.dirty = changedWhileSaving
+      setSharedTextStatus(changedWhileSaving ? '已保存，但编辑框有新修改未保存' : '已保存', changedWhileSaving ? '' : 'done')
       toast('已保存')
     } catch (error) {
       setSharedTextStatus(error.message, 'error')

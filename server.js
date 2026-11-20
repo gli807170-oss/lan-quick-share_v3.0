@@ -142,7 +142,13 @@ function parseCookies(header) {
   String(header || '').split(';').forEach(part => {
     const index = part.indexOf('=')
     if (index < 0) return
-    result[part.slice(0, index).trim()] = decodeURIComponent(part.slice(index + 1).trim())
+    let value
+    try {
+      value = decodeURIComponent(part.slice(index + 1).trim())
+    } catch {
+      return
+    }
+    result[part.slice(0, index).trim()] = value
   })
   return result
 }
@@ -356,9 +362,28 @@ app.post('/api/auth/logout', (req, res) => {
 
 // 除门禁接口与首页静态资源外，其余接口与文件通道全部需要已验证会话
 // ---------- V3.0 免密直链签名 ----------
-// 电视/播放器等设备无法携带登录 Cookie，这里用 HMAC 签名做长期有效的免密直链，
-// 密钥取配置中的口令摘要，服务重启后已发出的直链依然可用。
-const DIRECT_KEY = String(config.passwordSha256 || 'lan-file-share-v3')
+// 电视/播放器等设备无法携带登录 Cookie，这里用 HMAC 签名做长期有效的免密直链。
+// 签名密钥不能在源码/配置里公开：优先读取 config.directSignSecret，否则首次启动随机生成并持久化到 data/。
+const DIRECT_SECRET_FILE = path.join(__dirname, 'data', 'direct-secret')
+
+function loadDirectSecret() {
+  const configured = String(config.directSignSecret || '').trim()
+  if (configured) return configured
+  try {
+    const existing = fs.readFileSync(DIRECT_SECRET_FILE, 'utf8').trim()
+    if (existing) return existing
+  } catch {}
+  const secret = crypto.randomBytes(32).toString('hex')
+  try {
+    fs.mkdirSync(path.dirname(DIRECT_SECRET_FILE), { recursive: true })
+    fs.writeFileSync(DIRECT_SECRET_FILE, secret, { mode: 0o600 })
+  } catch (error) {
+    console.warn('[direct] 签名密钥持久化失败，本次重启后旧直链将失效：', error.message)
+  }
+  return secret
+}
+
+const DIRECT_KEY = loadDirectSecret()
 
 function directSign(name) {
   return crypto
@@ -369,27 +394,27 @@ function directSign(name) {
 }
 
 function directNameOf(req) {
-  const raw = String(req.path || '').replace(/^\/(files|media)\//, '')
-  let decoded = raw
+  // app.use('/files') 会改写 req.url/req.path，必须用 originalUrl 才能还原完整相对路径
+  const raw = String(req.originalUrl || req.url || '').split('?')[0]
+  const match = raw.match(/^\/(?:files|media)\/(.+)$/)
+  if (!match) return ''
   try {
-    decoded = decodeURIComponent(raw)
+    return decodeURIComponent(match[1]).replace(/\\/g, '/')
   } catch {
-    decoded = raw
+    return ''
   }
-  return decoded.replace(/\\/g, '/')
 }
 
 function hasValidDirectSign(req) {
   const sign = String((req.query && req.query.sign) || '')
-  if (!sign) return false
+  if (!/^[0-9a-f]{24}$/.test(sign)) return false
   const name = directNameOf(req)
   if (!name) return false
   const expect = directSign(name)
-  if (expect.length !== sign.length) return false
   return crypto.timingSafeEqual(Buffer.from(expect), Buffer.from(sign))
 }
 
-app.use(['/api/files', '/api/shared-text', '/api/upload', '/media'], requireAuth)
+app.use(['/api/files', '/api/shared-text', '/api/upload'], requireAuth)
 
 // /files 与 /media：带合法签名时放行，否则走密码校验
 app.use(['/files', '/media'], (req, res, next) => {
@@ -502,8 +527,8 @@ app.post('/api/upload', (req, res) => {
   })
 })
 
-app.get('/files/:name', (req, res) => {
-  const name = String(req.params.name || '').replace(/\\/g, '/')
+app.get('/files/*', (req, res) => {
+  const name = String(req.params[0] || '').replace(/\\/g, '/')
   const filePath = resolveUploadFile(name)
   if (!filePath) {
     return res.status(400).send('非法文件名')
@@ -517,8 +542,8 @@ app.get('/files/:name', (req, res) => {
 })
 
 // 内联播放通道：Content-Disposition 为 inline，配合 send 模块的 Range 支持实现拖动进度
-app.get('/media/:name', (req, res) => {
-  const name = String(req.params.name || '').replace(/\\/g, '/')
+app.get('/media/*', (req, res) => {
+  const name = String(req.params[0] || '').replace(/\\/g, '/')
   const filePath = resolveUploadFile(name)
   if (!filePath) {
     return res.status(400).send('非法文件名')
@@ -545,7 +570,7 @@ app.get('/media/:name', (req, res) => {
   })
 })
 
-app.delete('/api/files/:name', (req, res) => {
+app.delete('/api/files/:name', async (req, res) => {
   const name = String(req.params.name || '').replace(/\\/g, '/')
   const filePath = resolveUploadFile(name)
   if (!filePath) {
@@ -555,7 +580,12 @@ app.delete('/api/files/:name', (req, res) => {
     return res.status(404).json({ message: '文件不存在' })
   }
   // V3.0：删除改为移入回收站，可随时恢复
-  const result = moveToTrash(req, name, 'manual')
+  let result
+  try {
+    result = await moveToTrash(req, name, 'manual')
+  } catch (error) {
+    return res.status(500).json({ message: error.message || '移入回收站失败' })
+  }
   if (!result.ok) {
     return res.status(500).json({ message: result.error || '移入回收站失败' })
   }

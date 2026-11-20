@@ -21,6 +21,12 @@
     setTimeout(() => node.remove(), 3200)
   }
 
+  function notifyUnauthorized() {
+    try {
+      document.dispatchEvent(new CustomEvent('app:unauthorized'))
+    } catch {}
+  }
+
   async function api(path, options) {
     const opts = options || {}
     const init = { method: opts.method || 'GET', credentials: 'same-origin', headers: {} }
@@ -34,6 +40,7 @@
       data = await res.json()
     } catch {}
     if (!res.ok) {
+      if (res.status === 401) notifyUnauthorized()
       const error = new Error(data.message || `请求失败（${res.status}）`)
       error.status = res.status
       error.data = data
@@ -91,10 +98,49 @@
     return node
   }
 
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+  }
+
   // ============================================================
   // 一、文件列表：缩略图 + 勾选 + 选择工具条
   // ============================================================
   let selectBar = null
+  let listObserver = null
+
+  function visiblePickBoxes() {
+    return Array.prototype.slice.call(document.querySelectorAll('#fileList .v3-pick'))
+  }
+
+  function syncSelectAllState() {
+    const box = document.getElementById('v3SelectAll')
+    if (!box) return
+    const picks = visiblePickBoxes()
+    const checked = picks.filter(pick => pick.checked).length
+    box.checked = picks.length > 0 && checked === picks.length
+    box.indeterminate = checked > 0 && checked < picks.length
+  }
+
+  function pruneSelection(names) {
+    if (!Array.isArray(names)) return
+    const valid = new Set(names.map(String))
+    let changed = false
+    for (const name of selected) {
+      if (!valid.has(name)) {
+        selected.delete(name)
+        changed = true
+      }
+    }
+    if (changed) updateSelectCount()
+    syncSelectAllState()
+  }
+
+  window.__v3PruneSelection = pruneSelection
 
   function ensureSelectBar() {
     const list = document.getElementById('fileList')
@@ -111,15 +157,17 @@
     list.parentNode.insertBefore(bar, list)
     bar.querySelector('#v3SelectAll').addEventListener('change', event => {
       const checked = event.target.checked
-      document.querySelectorAll('#fileList .v3-pick').forEach(box => {
+      visiblePickBoxes().forEach(box => {
         box.checked = checked
         syncSelect(box)
       })
+      syncSelectAllState()
     })
     bar.querySelector('#v3ClearSel').addEventListener('click', () => {
       selected.clear()
-      document.querySelectorAll('#fileList .v3-pick').forEach(box => { box.checked = false })
+      visiblePickBoxes().forEach(box => { box.checked = false })
       updateSelectCount()
+      syncSelectAllState()
     })
     bar.querySelector('#v3ZipBtn').addEventListener('click', startZip)
     selectBar = bar
@@ -132,6 +180,7 @@
     if (box.checked) selected.add(name)
     else selected.delete(name)
     updateSelectCount()
+    syncSelectAllState()
   }
 
   function updateSelectCount() {
@@ -141,23 +190,41 @@
     if (zipBtn) zipBtn.disabled = selected.size === 0
   }
 
-  function startZip() {
+  async function startZip() {
     if (!selected.size) {
       toast('请先勾选要打包的文件')
       return
     }
-    const form = document.createElement('form')
-    form.method = 'POST'
-    form.action = `${API}/zip`
-    form.style.display = 'none'
-    const input = document.createElement('textarea')
-    input.name = 'names'
-    input.value = JSON.stringify([...selected])
-    form.appendChild(input)
-    document.body.appendChild(form)
-    form.submit()
-    setTimeout(() => form.remove(), 5000)
-    toast(`正在打包 ${selected.size} 个文件`)
+    const names = [...selected]
+    toast(`正在打包 ${names.length} 个文件`)
+    try {
+      const res = await fetch(`${API}/zip`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ names })
+      })
+      if (res.status === 401) notifyUnauthorized()
+      if (!res.ok) {
+        let data = {}
+        try { data = await res.json() } catch {}
+        throw new Error(data.message || `打包失败（${res.status}）`)
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const disposition = res.headers.get('Content-Disposition') || ''
+      const match = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = match ? decodeURIComponent(match[1]) : 'archive.zip'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 10000)
+      toast('打包完成')
+    } catch (error) {
+      toast(error.message || '打包失败', 'error')
+    }
   }
 
   // 缩略图
@@ -242,35 +309,41 @@
   window.__v3AddItemExtras = addItemExtras
 
   function decorateList() {
-    ensureSelectBar()
     const list = document.getElementById('fileList')
     if (!list) return
-    list.querySelectorAll('.file-thumb').forEach(node => {
-      if (node.dataset.done === '1') return
-      node.dataset.done = '1'
-      if (!node.dataset.media || node.dataset.media === 'file') {
-        node.textContent = 'FILE'
-        return
-      }
-      if (node.dataset.media === 'video' || node.dataset.media === 'audio') {
-        paintMediaPlaceholder(node, node.dataset.media)
-        return
-      }
-      node.classList.add('is-loading')
-      thumbQueue.push(node)
-    })
-    list.querySelectorAll('.v3-pick').forEach(box => {
-      box.checked = selected.has(box.dataset.name)
-    })
-    // 补插兜底：动作区已存在但缺分享按钮的行（含历史遗留 data-v3=1 的行）在此补齐
-    list.querySelectorAll('.file-item').forEach(item => {
-      if (item.querySelector('.file-actions .v3-share')) {
-        item.dataset.v3 = '1'
-        return
-      }
-      if (!ensureShareBtn(item)) scheduleShareRetry(item, 20)
-    })
-    pumpThumbs()
+    if (listObserver) listObserver.disconnect()
+    try {
+      ensureSelectBar()
+      list.querySelectorAll('.file-thumb').forEach(node => {
+        if (node.dataset.done === '1') return
+        node.dataset.done = '1'
+        if (!node.dataset.media || node.dataset.media === 'file') {
+          node.textContent = 'FILE'
+          return
+        }
+        if (node.dataset.media === 'video' || node.dataset.media === 'audio') {
+          paintMediaPlaceholder(node, node.dataset.media)
+          return
+        }
+        node.classList.add('is-loading')
+        thumbQueue.push(node)
+      })
+      visiblePickBoxes().forEach(box => {
+        box.checked = selected.has(box.dataset.name)
+      })
+      // 补插兜底：动作区已存在但缺分享按钮的行（含历史遗留 data-v3=1 的行）在此补齐
+      list.querySelectorAll('.file-item').forEach(item => {
+        if (item.querySelector('.file-actions .v3-share')) {
+          item.dataset.v3 = '1'
+          return
+        }
+        if (!ensureShareBtn(item)) scheduleShareRetry(item, 20)
+      })
+      syncSelectAllState()
+      pumpThumbs()
+    } finally {
+      if (listObserver) listObserver.observe(list, { childList: true, subtree: true })
+    }
   }
 
   function pumpThumbs() {
@@ -368,7 +441,7 @@
     // 只对「列表行/动作区」的结构性变化做出反应；忽略自身注入节点（缩略图/勾选框/分享按钮）
     // 引起的回声，避免 decorateList 被自己的插入动作反复触发
     const ownNodeClasses = ['file-thumb', 'v3-pick-wrap', 'v3-pick-box', 'v3-share']
-    const observer = new MutationObserver(mutations => {
+    listObserver = new MutationObserver(mutations => {
       const relevant = mutations.some(record => {
         const nodes = [...record.addedNodes, ...record.removedNodes]
         return nodes.some(node => {
@@ -378,7 +451,7 @@
       })
       if (relevant) decorateList()
     })
-    observer.observe(list, { childList: true, subtree: true })
+    listObserver.observe(list, { childList: true, subtree: true })
 
     const refresh = document.getElementById('refreshBtn')
     if (refresh) refresh.addEventListener('click', () => setTimeout(decorateList, 400))
@@ -400,7 +473,7 @@
     modal.innerHTML = `
       <h3>链接与直链</h3>
       <p class="v3-modal-tip">「免密直链」带签名，无需输入密码即可直接在电视、投影、播放器中打开；「免密码链接」生成独立页面链接，可设置过期时间。</p>
-      <div class="v3-field"><span style="flex:0 0 68px">文件</span><strong style="flex:1;word-break:break-all;font-weight:500">${display.replace(/</g, '&lt;')}</strong></div>
+      <div class="v3-field"><span style="flex:0 0 68px">文件</span><strong style="flex:1;word-break:break-all;font-weight:500">${escapeHtml(display)}</strong></div>
       <div class="v3-field"><span style="flex:0 0 68px">有效期</span>
         <select id="v3Ttl">
           <option value="1">1 小时</option>
@@ -435,7 +508,7 @@
         const ok = await copyText(link)
         toast(ok ? '免密直链已复制，电视/播放器可直接打开' : '直链已生成，请手动复制')
         const box = el('div', 'v3-link-result')
-        box.innerHTML = `<div style="opacity:.7;margin-bottom:6px">免密码直链（可直接在电视播放器打开）</div><div>${link}</div>`
+        box.innerHTML = `<div style="opacity:.7;margin-bottom:6px">免密码直链（可直接在电视播放器打开）</div><div>${escapeHtml(link)}</div>`
         const host = modal.querySelector('#v3ShareResult')
         host.innerHTML = ''
         host.appendChild(box)
@@ -454,7 +527,7 @@
         const data = await api('/share', { method: 'POST', body: { name, ttlHours: ttl } })
         const link = absolute(data.url)
         const box = el('div', 'v3-link-result')
-        box.innerHTML = `<div style="opacity:.7;margin-bottom:6px">${ttl > 0 ? `有效期至 ${formatTime(data.expiresAt)}` : '永久有效'}</div><div>${link}</div>`
+        box.innerHTML = `<div style="opacity:.7;margin-bottom:6px">${ttl > 0 ? `有效期至 ${formatTime(data.expiresAt)}` : '永久有效'}</div><div>${escapeHtml(link)}</div>`
         modal.querySelector('#v3ShareResult').innerHTML = ''
         modal.querySelector('#v3ShareResult').appendChild(box)
         const ok = await copyText(link)
@@ -538,6 +611,49 @@
     })
   }
 
+  let clientSalt = null
+  function getClientSalt() {
+    if (clientSalt) return clientSalt
+    try {
+      clientSalt = sessionStorage.getItem('v3UploadSalt')
+      if (!clientSalt) {
+        const bytes = new Uint32Array(2)
+        if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+          window.crypto.getRandomValues(bytes)
+        } else {
+          bytes[0] = Date.now() >>> 0
+          bytes[1] = Math.floor(Math.random() * 0xffffffff) >>> 0
+        }
+        clientSalt = `${bytes[0].toString(16)}${bytes[1].toString(16)}`
+        sessionStorage.setItem('v3UploadSalt', clientSalt)
+      }
+    } catch {
+      clientSalt = `fallback-${Date.now().toString(16)}`
+    }
+    return clientSalt
+  }
+
+  async function fileFingerprint(file) {
+    try {
+      const head = new Uint8Array(await file.slice(0, 65536).arrayBuffer())
+      const tail = file.size > 65536
+        ? new Uint8Array(await file.slice(file.size - 65536).arrayBuffer())
+        : new Uint8Array(0)
+      let hash = 2166136261
+      const mix = bytes => {
+        for (let i = 0; i < bytes.length; i += 1) {
+          hash ^= bytes[i]
+          hash = Math.imul(hash, 16777619) >>> 0
+        }
+      }
+      mix(head)
+      mix(tail)
+      return `${getClientSalt()}-${hash.toString(16)}-${head.length + tail.length}`
+    } catch {
+      return getClientSalt()
+    }
+  }
+
   function handlePicked(entries) {
     const valid = entries.filter(entry => entry && entry.file && entry.file.size > 0)
     if (!valid.length) {
@@ -590,12 +706,14 @@
     cancelBtn.addEventListener('click', () => {
       job.cancelled = true
       job.paused = false
+      job.state = 'cancelled'
       const waiters = job.waiters
       job.waiters = []
       waiters.forEach(resolve => resolve())
       cancelUploadTask(job)
       state.textContent = '已取消'
       row.classList.add('is-error')
+      updateOverall()
     })
     actions.appendChild(pauseBtn)
     actions.appendChild(cancelBtn)
@@ -653,25 +771,29 @@
       host.textContent = ''
       return
     }
-    const total = uploadState.totalBytes || 0
-    const sent = uploadState.jobs.reduce((sum, job) => sum + Math.min(job.sent || 0, job.file.size), 0)
+    const counted = uploadState.jobs.filter(job => job.state !== 'cancelled' && job.state !== 'error')
+    const total = counted.reduce((sum, job) => sum + job.file.size, 0)
+    const sent = counted.reduce((sum, job) => sum + Math.min(job.sent || 0, job.file.size), 0)
     const done = uploadState.jobs.filter(job => job.state === 'done').length
     const errors = uploadState.jobs.filter(job => job.state === 'error').length
-    const ratio = total ? (sent / total) * 100 : 0
+    const cancelled = uploadState.jobs.filter(job => job.state === 'cancelled').length
+    const ratio = total ? (sent / total) * 100 : 100
     host.hidden = false
-    host.textContent = `总进度 ${ratio.toFixed(1)}% · 已完成 ${done}/${uploadState.jobs.length} 个文件${errors ? ` · 失败 ${errors} 个` : ''} · 已上传 ${formatSize(sent)} / ${formatSize(total)}`
+    host.textContent = `总进度 ${ratio.toFixed(1)}% · 已完成 ${done}/${uploadState.jobs.length} 个文件${errors ? ` · 失败 ${errors} 个` : ''}${cancelled ? ` · 已取消 ${cancelled} 个` : ''} · 已上传 ${formatSize(sent)} / ${formatSize(total)}`
   }
 
   async function runUpload(job) {
     job.state = 'uploading'
     try {
+      const fingerprint = await fileFingerprint(job.file)
       const init = await api('/upload/init', {
         method: 'POST',
         body: {
           name: job.file.name,
           size: job.file.size,
           lastModified: job.file.lastModified,
-          relativePath: job.dir
+          relativePath: job.dir,
+          fingerprint
         }
       })
       job.uploadId = init.uploadId
@@ -713,12 +835,17 @@
       const refresh = document.getElementById('refreshBtn')
       if (refresh) refresh.click()
     } catch (error) {
-      job.state = 'error'
-      if (job.rowRefs) {
-        job.rowRefs.row.classList.add('is-error')
-        job.rowRefs.state.textContent = error.message || '上传失败'
+      if (job.cancelled || job.state === 'cancelled') {
+        job.state = 'cancelled'
+        if (job.rowRefs) job.rowRefs.state.textContent = '已取消'
+      } else {
+        job.state = 'error'
+        if (job.rowRefs) {
+          job.rowRefs.row.classList.add('is-error')
+          job.rowRefs.state.textContent = error.message || '上传失败'
+        }
+        toast(`${job.file.name}：${error.message || '上传失败'}`, 'error')
       }
-      toast(`${job.file.name}：${error.message || '上传失败'}`, 'error')
     }
   }
 
@@ -743,6 +870,7 @@
           resolve(data)
           return
         }
+        if (xhr.status === 401) notifyUnauthorized()
         const error = new Error(data.message || `分片上传失败（${xhr.status}）`)
         error.status = xhr.status
         error.data = data
@@ -1084,7 +1212,7 @@
       trashCache = []
       // 失败时也要结束“加载中…”状态，给出明确提示
       if (summary) summary.textContent = `加载失败`
-      list.innerHTML = `<div class="v3-empty">${error.message}</div>`
+      list.innerHTML = `<div class="v3-empty">${escapeHtml(error.message)}</div>`
     }
   }
 
@@ -1169,7 +1297,7 @@
         list.appendChild(row)
       }
     } catch (error) {
-      list.innerHTML = `<div class="v3-empty">${error.message}</div>`
+      list.innerHTML = `<div class="v3-empty">${escapeHtml(error.message)}</div>`
     }
   }
 
@@ -1257,7 +1385,7 @@
         list.appendChild(el('div', 'v3-empty', '仅展示前 500 项，实际清理会包含全部匹配文件'))
       }
     } catch (error) {
-      list.innerHTML = `<div class="v3-empty">${error.message}</div>`
+      list.innerHTML = `<div class="v3-empty">${escapeHtml(error.message)}</div>`
     }
   }
 
@@ -1404,7 +1532,7 @@
         list.appendChild(row)
       }
     } catch (error) {
-      list.innerHTML = `<div class="v3-empty">${error.message}</div>`
+      list.innerHTML = `<div class="v3-empty">${escapeHtml(error.message)}</div>`
     }
   }
 
@@ -1429,17 +1557,6 @@
       if (refresh) setTimeout(() => refresh.click(), 260)
     }
 
-    document.addEventListener('click', event => {
-      const entry = event.target && event.target.closest ? event.target.closest('[data-view="more"]') : null
-      if (!entry) return
-      setTimeout(() => {
-        loadTrash()
-        loadDisk()
-      }, 260)
-    })
-
-    const refresh = document.getElementById('refreshBtn')
-    if (refresh) refresh.addEventListener('click', () => setTimeout(decorateList, 500))
   }
 
   if (document.readyState === 'loading') {
