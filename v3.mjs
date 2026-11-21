@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import zlib from 'node:zlib'
 import { spawn } from 'node:child_process'
 import express from 'express'
 import QRCode from 'qrcode'
@@ -19,7 +20,7 @@ let cleanupTimer = null
 
 const CHUNK_SIZE = 8 * 1024 * 1024
 const MAX_ZIP_FILES = 300
-const LOG_ROTATE_BYTES = 5 * 1024 * 1024
+const LOG_COMPRESS_BYTES = 10 * 1024 * 1024
 const CHUNK_STALE_MS = 7 * 24 * 60 * 60 * 1000
 
 function ctx() {
@@ -57,14 +58,24 @@ function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj, key)
 }
 
+function asciiHeaderName(name) {
+  const value = String(name || '').replace(/[\r\n]/g, '_')
+  const ascii = value.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, "'").trim()
+  return ascii || 'file'
+}
+
+function inlineDispositionOf(name) {
+  const shown = CTX.displayNameOf(name)
+  return `inline; filename="${asciiHeaderName(shown)}"; filename*=UTF-8''${encodeURIComponent(shown)}`
+}
+
 // ---------- 路径安全 ----------
 function normalizeRel(input) {
   const raw = String(input || '').replace(/\\/g, '/')
   const parts = raw.split('/').filter(part => part && part !== '.')
   if (!parts.length) return null
   for (const part of parts) {
-    if (part === '..') return null
-    if (part.startsWith('.')) return null
+    if (part === '..' || part === '.') return null
   }
   return parts.join('/')
 }
@@ -132,34 +143,118 @@ function dedupeCount(store, key, windowMs = COUNT_DEDUPE_WINDOW_MS) {
   return true
 }
 
-// ---------- 操作日志 ----------
-function logPath() {
-  return path.join(ctx().dataDir, 'operation-log.jsonl')
+// ---------- 操作日志（统一存放于项目根目录 LOG/） ----------
+function logDir() {
+  return path.join(ctx().rootDir, 'LOG')
 }
 
-function pruneRotatedLogs() {
-  try {
-    const dir = ctx().dataDir
-    const files = fs.readdirSync(dir).filter(name => /^operation-log\.\d+\.jsonl$/.test(name)).sort()
-    while (files.length > 3) {
-      const victim = files.shift()
-      try { fs.unlinkSync(path.join(dir, victim)) } catch {}
-    }
-  } catch {}
+// 三类结构化日志，统一命名 <kind>-log.jsonl
+const LOG_KINDS = ['operation', 'detail', 'access']
+function logPath(kind = 'operation') {
+  return path.join(logDir(), `${kind}-log.jsonl`)
 }
 
-function appendLog(entry) {
-  try {
-    ensureDir(ctx().dataDir)
-    const file = logPath()
-    if (fs.existsSync(file) && fs.statSync(file).size > LOG_ROTATE_BYTES) {
-      try { fs.renameSync(file, path.join(ctx().dataDir, `operation-log.${Date.now()}.jsonl`)) } catch {}
-      pruneRotatedLogs()
+// 迁移历史日志：把 data/ 下的旧日志搬到 LOG/，避免散落两处
+function migrateLegacyLogs() {
+  const dataDir = ctx().dataDir
+  const target = logDir()
+  try { ensureDir(target) } catch {}
+  const collect = (dir) => {
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        // 只收拢本应用的结构化 JSONL 日志；旧的重定向 .log 已废弃，不再迁移
+        if (!/^(operation|detail|access)-log.*\.jsonl(\.gz)?$/.test(name)) continue
+        const from = path.join(dir, name)
+        const to = path.join(target, name)
+        try {
+          if (!fs.existsSync(to)) fs.renameSync(from, to)
+        } catch {}
+      }
+    } catch {}
+  }
+  collect(dataDir)
+  collect(ctx().rootDir)
+}
+
+// 日志达到 10MB 时压缩归档：按「时间节点 + 日志类型」命名，永久保留
+// 归档完成后清空活动日志，以当前时间节点开启新日志
+function compressLogsIfNeeded(kind = 'operation') {
+  const src = logPath(kind)
+  let size = 0
+  try { size = fs.statSync(src).size } catch { return }
+  if (size < LOG_COMPRESS_BYTES) return
+  const lines = fs.readFileSync(src, 'utf8').split('\n').filter(Boolean)
+  if (!lines.length) return
+  const groups = new Map()
+  for (const line of lines) {
+    let item = null
+    try { item = JSON.parse(line) } catch { continue }
+    const action = typeof item.action === 'string' && item.action ? item.action : 'other'
+    if (!groups.has(action)) groups.set(action, [])
+    groups.get(action).push(line)
+  }
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-')
+  for (const [action, groupLines] of groups) {
+    const safeAction = action.replace(/[^a-zA-Z0-9-_]/g, '_')
+    const out = path.join(logDir(), `${kind}-log.${stamp}.${safeAction}.jsonl.gz`)
+    try {
+      fs.writeFileSync(out, zlib.gzipSync(`${groupLines.join('\n')}\n`))
+    } catch (error) {
+      console.warn('[v3] 日志压缩失败：', error.message)
     }
+  }
+  try { fs.writeFileSync(src, '') } catch {}
+}
+
+function appendLogTo(kind, entry) {
+  try {
+    ensureDir(logDir())
+    const file = logPath(kind)
+    compressLogsIfNeeded(kind)
     fs.appendFileSync(file, `${JSON.stringify(entry)}\n`, 'utf8')
   } catch (error) {
     console.warn('[v3] 日志写入失败：', error.message)
   }
+}
+
+function appendLog(entry) {
+  appendLogTo('operation', entry)
+}
+
+// 读取某类日志的全部条目（含 gz 归档），供统计聚合使用
+function readAllLogEntries(kind = 'operation') {
+  const dir = logDir()
+  const prefix = `${kind}-log`
+  const groups = []
+  try {
+    const archives = fs.readdirSync(dir).filter(name => new RegExp(`^${prefix}\\..*\\.jsonl\\.gz$`).test(name)).sort()
+    for (const name of archives) {
+      try {
+        groups.push(zlib.gunzipSync(fs.readFileSync(path.join(dir, name))).toString('utf8').split('\n').filter(Boolean))
+      } catch {}
+    }
+  } catch {}
+  const file = logPath(kind)
+  if (fs.existsSync(file)) {
+    try { groups.push(fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)) } catch {}
+  }
+  const entries = []
+  for (const lines of groups) {
+    for (const line of lines) {
+      try { entries.push(JSON.parse(line)) } catch {}
+    }
+  }
+  return entries
+}
+
+// 详细日志：记录所有设备及 IP 的访问与动作（供 server.js 中间件调用）
+export function writeDetailLog(entry) {
+  appendLogTo('detail', entry)
+}
+
+// 启动日志：记录服务启动信息
+export function writeStartupLog(entry) {
+  appendLogTo('access', entry)
 }
 
 // UA -> 可读设备名（形如 Windows·Chrome、iPhone·Safari、Android·微信内置浏览器）
@@ -217,28 +312,41 @@ export function logAction(req, action, extra = {}) {
   })
 }
 
-function readLogs(limit, action) {
-  const file = logPath()
-  if (!fs.existsSync(file)) return { items: [], total: 0 }
-  let lines = []
+function readLogs(limit, action, kind = 'operation') {
+  const dir = logDir()
+  const chunks = []
+  const prefix = `${kind}-log`
+  // 归档（.gz）按文件名倒序：文件名内嵌时间戳，越新越靠后
   try {
-    lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)
-  } catch {
-    return { items: [], total: 0 }
+    const archives = fs.readdirSync(dir).filter(name => new RegExp(`^${prefix}\\..*\\.jsonl\\.gz$`).test(name)).sort().reverse()
+    for (const name of archives) {
+      try {
+        const text = zlib.gunzipSync(fs.readFileSync(path.join(dir, name))).toString('utf8')
+        chunks.push(text.split('\n').filter(Boolean))
+      } catch {}
+    }
+  } catch {}
+  // 当前活动日志
+  const file = logPath(kind)
+  if (fs.existsSync(file)) {
+    try { chunks.push(fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)) } catch {}
   }
+  const total = chunks.reduce((sum, group) => sum + group.length, 0)
   const parsed = []
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    let item = null
-    try { item = JSON.parse(lines[index]) } catch { continue }
-    if (action && action !== 'all' && item.action !== action) continue
-    // 兼容历史日志：旧记录可能没有 device 字段（甚至没有 ua），一律补成字符串，避免前端拿到 undefined
-    if (!item.device && item.ua) item.device = describeDevice(item.ua)
-    if (typeof item.device !== 'string') item.device = ''
-    if (typeof item.ip !== 'string') item.ip = item.ip ? String(item.ip) : ''
-    parsed.push(item)
-    if (parsed.length >= limit) break
+  outer: for (let g = chunks.length - 1; g >= 0; g -= 1) {
+    const lines = chunks[g]
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      let item = null
+      try { item = JSON.parse(lines[index]) } catch { continue }
+      if (action && action !== 'all' && item.action !== action) continue
+      if (!item.device && item.ua) item.device = describeDevice(item.ua)
+      if (typeof item.device !== 'string') item.device = ''
+      if (typeof item.ip !== 'string') item.ip = item.ip ? String(item.ip) : ''
+      parsed.push(item)
+      if (parsed.length >= limit) break outer
+    }
   }
-  return { items: parsed, total: lines.length }
+  return { items: parsed, total }
 }
 
 // ---------- 最近访问时间（供定时清理判断） ----------
@@ -434,14 +542,20 @@ function writeShares() {
 }
 
 function createShare(rel, ttlHours) {
+  const now = Date.now()
+  // 复用：同名且未过期的链接直接返回，避免重复生成浪费资源
+  const existing = Object.values(readShares()).find(item =>
+    item && item.name === rel && (!item.expiresAt || item.expiresAt > now))
+  if (existing) return { item: existing, reused: true }
+
   const token = crypto.randomBytes(9).toString('base64url')
   const hours = Number(ttlHours)
-  const expiresAt = Number.isFinite(hours) && hours > 0 ? Date.now() + hours * 3600 * 1000 : null
-  const item = { token, name: rel, createdAt: Date.now(), expiresAt, hits: 0 }
+  const expiresAt = Number.isFinite(hours) && hours > 0 ? now + hours * 3600 * 1000 : null
+  const item = { token, name: rel, createdAt: now, expiresAt, hits: 0 }
   mutateShares(shares => {
     shares[token] = item
   })
-  return item
+  return { item, reused: false }
 }
 
 function resolveShare(token) {
@@ -587,6 +701,86 @@ function sanitizeDateTimeForName(date) {
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}`
 }
 
+function collectZipEntries(absDir, relBase = '', depth = 0, out = []) {
+  if (depth > 8) return out
+  let entries = []
+  try {
+    entries = fs.readdirSync(absDir, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const entry of entries) {
+    if (!entry.name || entry.name.startsWith('.')) continue
+    const rel = relBase ? `${relBase}/${entry.name}` : entry.name
+    const abs = path.join(absDir, entry.name)
+    if (entry.isDirectory()) collectZipEntries(abs, rel, depth + 1, out)
+    else if (entry.isFile()) out.push({ abs, display: rel })
+  }
+  return out
+}
+
+export function streamZipEntries(req, res, entries, zipName, zipTmpDir) {
+  const stagingDir = path.join(zipTmpDir, crypto.randomUUID())
+  ensureDir(stagingDir)
+  const used = new Set()
+  const stagedNames = []
+  for (const entry of entries) {
+    const name = safeZipName(entry.display, used)
+    const target = path.join(stagingDir, name)
+    try {
+      fs.linkSync(entry.abs, target)
+    } catch {
+      try { fs.copyFileSync(entry.abs, target) } catch { continue }
+    }
+    stagedNames.push(name)
+  }
+  if (!stagedNames.length) {
+    fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => {})
+    return false
+  }
+
+  res.setHeader('Content-Type', 'application/zip')
+  res.setHeader('Content-Disposition', `attachment; filename="archive.zip"; filename*=UTF-8''${encodeURIComponent(zipName)}`)
+  res.setHeader('Cache-Control', 'no-store')
+  logAction(req, 'zip', { count: stagedNames.length })
+
+  const child = spawn('tar', ['--format', 'zip', '-cf', '-', ...stagedNames], {
+    cwd: stagingDir,
+    windowsHide: true
+  })
+  let failed = false
+  child.on('error', error => {
+    failed = true
+    console.warn('[v3] 打包进程启动失败：', error.message)
+    if (!res.headersSent) res.status(500).end('打包失败：系统缺少 tar 组件')
+    else res.destroy()
+  })
+  child.stdout.pipe(res)
+  child.stderr.on('data', chunk => {
+    const text = String(chunk || '').trim()
+    if (text) console.warn('[v3] 打包提示：', text)
+  })
+  const cleanup = () => {
+    fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => {})
+  }
+  child.on('close', code => {
+    cleanup()
+    if (code !== 0 && !failed) console.warn('[v3] 打包退出码：', code)
+  })
+  res.on('close', () => {
+    if (!child.killed) child.kill()
+    cleanup()
+  })
+  return true
+}
+
+export function streamDirectoryZip(req, res, absDir, displayName, zipTmpDir) {
+  const entries = collectZipEntries(absDir)
+  if (!entries.length) return false
+  const zipName = `${displayName}-${sanitizeDateTimeForName(new Date())}.zip`
+  return streamZipEntries(req, res, entries, zipName, zipTmpDir)
+}
+
 // ---------- 分片上传 ----------
 function uploadJsonPath(id) {
   return path.join(ctx().chunkDir, `${id}.json`)
@@ -644,6 +838,8 @@ export function attachV3(app, options) {
   ensureDir(CTX.trashDir)
   ensureDir(CTX.chunkDir)
   ensureDir(CTX.zipTmpDir)
+  ensureDir(logDir())
+  migrateLegacyLogs()
   loadAccessMap()
   cleanupStaleChunks()
   startCleanupScheduler()
@@ -652,6 +848,24 @@ export function attachV3(app, options) {
 
   const api = express.Router()
   api.use(CTX.requireAuth)
+
+  // 仅服务器本机 IP 可执行的高权限操作
+  function requireLocal(req, res, next) {
+    const local = typeof CTX.isLocalAddress === 'function'
+      && CTX.isLocalAddress(req?.socket?.remoteAddress)
+    if (!local) {
+      return res.status(403).json({ code: 'LOCAL_ONLY', message: '该操作仅允许在服务器本机执行' })
+    }
+    next()
+  }
+
+  // 高权限命名空间：回收站 / 日志 / 磁盘与清理 / 分享链接管理
+  // 放在业务路由之前，统一拦截非本机访问
+  api.use((req, res, next) => {
+    const highPriv = /^\/(trash|logs|cleanup|disk|shares)(\/|$)/.test(req.path)
+    if (!highPriv) return next()
+    return requireLocal(req, res, next)
+  })
 
   // ---- 磁盘与概览 ----
   api.get('/disk', (_req, res) => {
@@ -693,20 +907,25 @@ export function attachV3(app, options) {
   api.get('/direct', (req, res) => {
     const rel = normalizeRel(req.query && req.query.name)
     const abs = rel ? resolveInUpload(rel) : null
-    if (!abs || !fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
-      return res.status(404).json({ message: '文件不存在' })
+    let stat = null
+    try { stat = abs ? fs.statSync(abs) : null } catch {}
+    if (!stat || (!stat.isFile() && !stat.isDirectory())) {
+      return res.status(404).json({ message: '文件或文件夹不存在' })
     }
     if (typeof CTX.directSign !== 'function') {
       return res.status(500).json({ message: '直链签名不可用' })
     }
+    const isDir = stat.isDirectory()
     const sign = CTX.directSign(rel)
     const encoded = rel.split('/').map(segment => encodeURIComponent(segment)).join('/')
-    logAction(req, 'share-create', { name: rel, mode: 'direct' })
+    const suffix = isDir ? `zip=1&sign=${sign}` : `sign=${sign}`
+    logAction(req, 'direct-link', { name: rel, mode: isDir ? 'folder' : 'file' })
     res.json({
       name: rel,
       sign,
-      url: `/media/${encoded}?sign=${sign}`,
-      downloadUrl: `/files/${encoded}?sign=${sign}`
+      isDir,
+      url: isDir ? `/files/${encoded}?${suffix}` : `/media/${encoded}?${suffix}`,
+      downloadUrl: `/files/${encoded}?${suffix}`
     })
   })
 
@@ -732,74 +951,31 @@ export function attachV3(app, options) {
       if (!abs || !fs.existsSync(abs)) continue
       let stat = null
       try { stat = fs.statSync(abs) } catch { continue }
-      if (!stat.isFile()) continue
-      entries.push({ rel, abs, display: CTX.displayNameOf(rel).replace(/\//g, ' - ') })
+      if (stat.isDirectory()) {
+        for (const found of collectZipEntries(abs, rel)) {
+          entries.push({ abs: found.abs, display: found.display })
+        }
+      } else if (stat.isFile()) {
+        entries.push({ abs, display: CTX.displayNameOf(rel).replace(/\//g, ' - ') })
+      }
     }
     if (!entries.length) return res.status(404).json({ message: '所选文件均不存在' })
 
-    const stagingDir = path.join(CTX.zipTmpDir, crypto.randomUUID())
-    ensureDir(stagingDir)
-    const used = new Set()
-    const stagedNames = []
-    for (const entry of entries) {
-      const name = safeZipName(entry.display, used)
-      const target = path.join(stagingDir, name)
-      try {
-        fs.linkSync(entry.abs, target)
-      } catch {
-        try { fs.copyFileSync(entry.abs, target) } catch { continue }
-      }
-      stagedNames.push(name)
-    }
-    if (!stagedNames.length) {
-      fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => {})
+    const zipName = `局域网文件打包-${sanitizeDateTimeForName(new Date())}.zip`
+    if (!streamZipEntries(req, res, entries, zipName, CTX.zipTmpDir)) {
       return res.status(500).json({ message: '打包失败：文件暂存出错' })
     }
-
-    const zipName = `局域网文件打包-${sanitizeDateTimeForName(new Date())}.zip`
-    res.setHeader('Content-Type', 'application/zip')
-    res.setHeader('Content-Disposition', `attachment; filename="archive.zip"; filename*=UTF-8''${encodeURIComponent(zipName)}`)
-    res.setHeader('Cache-Control', 'no-store')
-    logAction(req, 'zip', { count: stagedNames.length })
-
-    const child = spawn('tar', ['--format', 'zip', '-cf', '-', ...stagedNames], {
-      cwd: stagingDir,
-      windowsHide: true
-    })
-    let failed = false
-    child.on('error', error => {
-      failed = true
-      console.warn('[v3] 打包进程启动失败：', error.message)
-      if (!res.headersSent) res.status(500).end('打包失败：系统缺少 tar 组件')
-      else res.destroy()
-    })
-    child.stdout.pipe(res)
-    child.stderr.on('data', chunk => {
-      const text = String(chunk || '').trim()
-      if (text) console.warn('[v3] 打包提示：', text)
-    })
-    const cleanup = () => {
-      fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => {})
-    }
-    child.on('close', code => {
-      cleanup()
-      if (code !== 0 && !failed) console.warn('[v3] 打包退出码：', code)
-    })
-    res.on('close', () => {
-      if (!child.killed) child.kill()
-      cleanup()
-    })
   })
 
   // ---- 分享链接 ----
   api.post('/share', (req, res) => {
     const rel = normalizeRel(req.body?.name)
     const abs = rel ? resolveInUpload(rel) : null
-    if (!abs || !fs.existsSync(abs)) return res.status(404).json({ message: '文件不存在' })
+    if (!abs || !fs.existsSync(abs)) return res.status(404).json({ message: '文件或文件夹不存在' })
     const ttlHours = req.body?.ttlHours === undefined ? 24 : Number(req.body.ttlHours)
-    const share = createShare(rel, ttlHours)
-    logAction(req, 'share-create', { name: rel, ttlHours: share.expiresAt ? ttlHours : 0 })
-    res.json({ token: share.token, url: `/s/${share.token}`, expiresAt: share.expiresAt, name: rel })
+    const { item: share, reused } = createShare(rel, ttlHours)
+    if (!reused) logAction(req, 'share-create', { name: rel, ttlHours: share.expiresAt ? ttlHours : 0 })
+    res.json({ token: share.token, url: `/s/${share.token}`, expiresAt: share.expiresAt, name: rel, reused })
   })
 
   api.get('/shares', (_req, res) => {
@@ -809,6 +985,23 @@ export function attachV3(app, options) {
       .map(item => ({ ...item, expired: Boolean(item.expiresAt && item.expiresAt <= now) }))
       .sort((a, b) => b.createdAt - a.createdAt)
     res.json({ items })
+  })
+
+  // 批量撤销：放在 /:token 之前，避免 batch 被当作 token
+  api.delete('/shares/batch', (req, res) => {
+    const tokens = Array.isArray(req.body?.tokens) ? req.body.tokens.map(String) : []
+    if (!tokens.length) return res.status(400).json({ message: '未指定要撤销的链接' })
+    let removed = 0
+    mutateShares(shares => {
+      for (const token of tokens) {
+        if (hasOwn(shares, token)) {
+          delete shares[token]
+          removed += 1
+        }
+      }
+    })
+    if (removed) logAction(req, 'share-delete', { count: removed, mode: 'batch' })
+    res.json({ ok: true, removed })
   })
 
   api.delete('/shares/:token', (req, res) => {
@@ -910,16 +1103,152 @@ export function attachV3(app, options) {
     res.json({ ok: failed.length === 0, cleared: list.length - remain.length, failed })
   })
 
+  // ---- 行为埋点（文件/文件夹查看等轻量事件） ----
+  api.post('/track', (req, res) => {
+    const action = String(req.body?.action || '')
+    if (action === 'dir-view') {
+      const path = String(req.body?.path || '').split('/').filter(Boolean).join('/').slice(0, 500)
+      logAction(req, 'dir-view', { name: path || '/' })
+      return res.json({ ok: true })
+    }
+    if (action === 'file-view') {
+      const name = normalizeRel(String(req.body?.name || ''))
+      if (name) logAction(req, 'file-view', { name })
+      return res.json({ ok: true })
+    }
+    res.status(400).json({ message: '未知埋点类型' })
+  })
+
+  // ---- 我的上传记录（与操作日志一致，仅当前 IP） ----
+  // 直接以操作日志中的 upload 条目为准，逐条核对文件当前状态
+  api.get('/my-uploads', (req, res) => {
+    const ip = clientIp(req)
+    const result = readLogs(500, 'upload')
+    const items = result.items
+      .filter(item => item.ip === ip)
+      .map(item => {
+        const name = String(item.name || '')
+        const abs = resolveInUpload(name)
+        let exists = false
+        if (abs) {
+          try { exists = fs.existsSync(abs) } catch {}
+        }
+        return {
+          name,
+          displayName: CTX.displayNameOf(name),
+          size: Number(item.size) || 0,
+          dir: typeof item.dir === 'string' ? item.dir : '',
+          ts: Number(item.ts) || 0,
+          mode: item.mode || '',
+          status: exists ? 'exists' : 'deleted'
+        }
+      })
+    res.json({ items, total: items.length })
+  })
+
+  // ---- 重复文件检测（按内容指纹 + 大小） ----
+  api.post('/upload/check', (req, res) => {
+    const size = Number(req.body?.size || 0)
+    const fingerprint = String(req.body?.fingerprint || '').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 96)
+    if (!(size > 0) || !fingerprint) return res.json({ duplicate: false })
+    // 扫描指纹索引：上传完成时写入 data/upload-fingerprints.json
+    const index = readJson(path.join(ctx().dataDir, 'upload-fingerprints.json'), {})
+    let match = null
+    for (const key of Object.keys(index)) {
+      const entry = index[key]
+      if (!entry || entry.size !== size || entry.fingerprint !== fingerprint) continue
+      const abs = resolveInUpload(entry.name)
+      let exists = false
+      try { exists = abs ? fs.existsSync(abs) : false } catch {}
+      if (!exists) continue
+      match = entry
+      break
+    }
+    res.json({ duplicate: Boolean(match), name: match ? CTX.displayNameOf(match.name) : '' })
+  })
+
+  // ---- 统计（上传/下载/文件查看/各IP设备登录/热门文件） ----
+  api.get('/stats', (_req, res) => {
+    const op = readAllLogEntries('operation')
+    const count = action => op.filter(item => item && item.action === action).length
+    // 各 IP 登录次数：同时把设备归并
+    const loginMap = new Map()
+    // 热门文件：按动作分别聚合文件名出现次数
+    const hotView = new Map()
+    const hotDownload = new Map()
+    const hotShare = new Map()
+    const bump = (map, name) => {
+      if (!name) return
+      map.set(name, (map.get(name) || 0) + 1)
+    }
+    for (const item of op) {
+      if (!item) continue
+      const name = String(item.name || '')
+      if (item.action === 'login') {
+        const ip = String(item.ip || '未知')
+        if (!loginMap.has(ip)) loginMap.set(ip, { ip, count: 0, device: item.device || '', local: Boolean(item.local) })
+        loginMap.get(ip).count += 1
+      }
+      if (item.action === 'file-view') bump(hotView, name)
+      if (item.action === 'download' || item.action === 'zip') bump(hotDownload, name)
+      if (item.action === 'share-create') bump(hotShare, name)
+    }
+    const logins = [...loginMap.values()].sort((a, b) => b.count - a.count)
+    const topN = map => [...map.entries()]
+      .map(([name, count]) => ({ name: CTX.displayNameOf(name), count }))
+      .sort((a, b) => b.count - a.count).slice(0, 8)
+    // 近 7 天趋势（按本地日期）
+    const days = []
+    const dayMap = new Map()
+    for (let i = 6; i >= 0; i -= 1) {
+      const d = new Date()
+      d.setDate(d.getDate() - i)
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+      dayMap.set(key, { date: key, upload: 0, download: 0 })
+      days.push(key)
+    }
+    for (const item of op) {
+      if (!item || !item.ts) continue
+      const d = new Date(Number(item.ts))
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+      const bucket = dayMap.get(key)
+      if (!bucket) continue
+      if (item.action === 'upload') bucket.upload += 1
+      if (item.action === 'download' || item.action === 'zip') bucket.download += 1
+    }
+    res.json({
+      total: {
+        upload: count('upload'),
+        download: count('download') + count('zip'),
+        fileView: count('file-view'),
+        login: count('login')
+      },
+      logins,
+      trend: days.map(key => dayMap.get(key)),
+      hot: { view: topN(hotView), download: topN(hotDownload), share: topN(hotShare) }
+    })
+  })
+
   // ---- 操作日志 ----
   api.get('/logs', (req, res) => {
     const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200))
     const action = String(req.query.action || 'all')
-    const result = readLogs(limit, action)
-    res.json({ ...result, actions: ['all', 'upload', 'download', 'delete', 'restore', 'purge', 'zip', 'share-create', 'share-open', 'cleanup'] })
+    const kind = LOG_KINDS.includes(String(req.query.kind)) ? String(req.query.kind) : 'operation'
+    const result = readLogs(limit, action, kind)
+    res.json({ ...result, kind, actions: ['all', 'upload', 'download', 'delete', 'restore', 'purge', 'trash-empty', 'zip', 'share-create', 'share-delete', 'share-open', 'direct-link', 'cleanup', 'cleanup-config', 'dir-view', 'file-view', 'login', 'visit', 'startup'] })
   })
 
-  api.delete('/logs', (_req, res) => {
-    try { fs.writeFileSync(logPath(), '', 'utf8') } catch {}
+  api.delete('/logs', (req, res) => {
+    const kind = LOG_KINDS.includes(String(req.query.kind)) ? String(req.query.kind) : 'operation'
+    try { fs.writeFileSync(logPath(kind), '', 'utf8') } catch {}
+    try {
+      const prefix = `${kind}-log`
+      for (const name of fs.readdirSync(logDir())) {
+        if (new RegExp(`^${prefix}\\..*\\.jsonl\\.gz$`).test(name)) {
+          try { fs.unlinkSync(path.join(logDir(), name)) } catch {}
+        }
+      }
+    } catch {}
     res.json({ ok: true })
   })
 
@@ -978,8 +1307,8 @@ export function attachV3(app, options) {
     const id = crypto.createHash('sha1').update(`${fingerprint}|${dir}|${name}|${size}`).digest('hex').slice(0, 32)
     const metaPath = uploadJsonPath(id)
     let meta = readJson(metaPath, null)
-    if (!meta || meta.size !== size || meta.name !== name || meta.dir !== dir) {
-      meta = { id, name, size, dir, createdAt: Date.now() }
+    if (!meta || meta.size !== size || meta.name !== name || meta.dir !== dir || meta.fingerprint !== fingerprint) {
+      meta = { id, name, size, dir, fingerprint, createdAt: Date.now() }
       writeJson(metaPath, meta)
       try { fs.writeFileSync(uploadPartPath(id), '') } catch {}
     }
@@ -1043,7 +1372,16 @@ export function attachV3(app, options) {
     try { fs.unlinkSync(uploadJsonPath(meta.id)) } catch {}
 
     const rel = meta.dir ? `${meta.dir}/${finalName}` : finalName
-    logAction(req, 'upload', { name: rel, size: meta.size, mode: 'chunked' })
+    // 记录内容指纹索引，供重复上传检测使用
+    if (meta.fingerprint) {
+      const indexFile = path.join(ctx().dataDir, 'upload-fingerprints.json')
+      const index = readJson(indexFile, {})
+      index[`${meta.fingerprint}|${meta.size}`] = {
+        name: rel, size: meta.size, fingerprint: meta.fingerprint, at: Date.now()
+      }
+      writeJson(indexFile, index)
+    }
+    logAction(req, 'upload', { name: rel, size: meta.size, mode: 'chunked', fingerprint: meta.fingerprint || '', dir: meta.dir || '' })
     res.json({ ok: true, name: rel, size: meta.size, path: rel })
   })
 
@@ -1058,26 +1396,54 @@ export function attachV3(app, options) {
 
   app.use('/api/v3', api)
 
+  // ---- 公开二维码访问（无需密码，任何 IP 可用） ----
+  app.get('/api/public/qr-target', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ url: qrTargetFor(req) })
+  })
+  app.get('/api/public/qr', async (req, res) => {
+    const requested = typeof req.query.url === 'string' ? req.query.url.trim() : ''
+    const usable = /^https?:\/\//i.test(requested) && !requested.includes('*')
+    const target = usable ? requested : qrTargetFor(req)
+    try {
+      const svg = await QRCode.toString(target, { type: 'svg', margin: 1, width: 240, errorCorrectionLevel: 'M' })
+      res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8')
+      res.setHeader('Cache-Control', 'no-store')
+      res.send(svg)
+    } catch (error) {
+      res.status(500).json({ message: `二维码生成失败：${error.message}` })
+    }
+  })
+
   // ---- 分享链接访问（无需密码） ----
   app.get('/s/:token', (req, res) => {
     const share = resolveShare(req.params.token)
     if (!share) return res.status(410).send('分享链接已过期或不存在')
     const abs = resolveInUpload(share.name)
     if (!abs || !fs.existsSync(abs)) return res.status(404).send('文件不存在')
+    let stat = null
+    try { stat = fs.statSync(abs) } catch {}
+    if (!stat) return res.status(404).send('文件不存在')
     bumpShareHit(req, share.token)
     noteDownload(req, share.name)
     res.setTimeout(0)
+    if (stat.isDirectory()) {
+      if (!streamDirectoryZip(req, res, abs, path.basename(share.name), CTX.zipTmpDir)) {
+        return res.status(404).send('文件夹为空或不存在')
+      }
+      return
+    }
     const mediaType = CTX.mediaTypeOf(share.name)
     if (mediaType === 'file') {
-      return res.download(abs, CTX.displayNameOf(share.name))
+      return res.download(abs, CTX.displayNameOf(share.name), { dotfiles: 'allow' })
     }
     const mime = CTX.mimeOf(share.name) || 'application/octet-stream'
-    const showName = CTX.displayNameOf(share.name).replace(/"/g, "'")
     res.sendFile(abs, {
       acceptRanges: true,
+      dotfiles: 'allow',
       headers: {
         'Content-Type': mime,
-        'Content-Disposition': `inline; filename="${showName}"; filename*=UTF-8''${encodeURIComponent(showName)}`,
+        'Content-Disposition': inlineDispositionOf(share.name),
         'Accept-Ranges': 'bytes',
         'Cache-Control': 'public, max-age=3600'
       }

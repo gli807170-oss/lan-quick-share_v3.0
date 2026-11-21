@@ -29,7 +29,7 @@
       </div>
       <div class="header-right">
         <!-- IP / 访问地址仅在“服务信息”页展示，顶栏不再显示 -->
-        <button id="authBtn" class="btn ghost small" type="button" hidden>退出验证</button>
+        <button id="authBtn" class="btn icon-btn ghost small" type="button" hidden title="退出验证" aria-label="退出验证"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 5H5v14h5M14 8l4 4-4 4m4-4H9"/></svg></button>
       </div>
     </header>
 
@@ -108,13 +108,47 @@
           <span class="entry-desc">访问地址、端口与上传上限等运行信息</span>
           <span class="entry-lock unlocked">无需密码</span>
         </button>
+
+        <button class="entry-card" type="button" data-view="qrcode">
+          <span class="entry-arrow">→</span>
+          <span class="entry-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="7" rx="1" />
+              <rect x="14" y="3" width="7" height="7" rx="1" />
+              <rect x="3" y="14" width="7" height="7" rx="1" />
+              <path d="M14 14h3v3h-3zM19 19h2v2h-2zM14 19h2v2h-2zM19 14h2v2h-2z" />
+            </svg>
+          </span>
+          <span class="entry-title">扫码访问</span>
+          <span class="entry-desc">二维码快速访问本机服务，任何设备均可打开</span>
+          <span class="entry-lock unlocked">无需密码</span>
+        </button>
+      </section>
+    </main>
+
+    <!-- 功能区：扫码访问（无需密码） -->
+    <main id="view-qrcode" class="view" hidden>
+      <div class="view-head">
+        <button class="btn icon-btn ghost small back-btn" type="button" data-back title="返回入口" aria-label="返回入口"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <h2>扫码访问</h2>
+      </div>
+      <section class="card">
+        <div class="v3-qr-box">
+          <div class="v3-qr-card"><img id="publicQrImage" alt="访问二维码" /></div>
+          <div class="v3-qr-side">
+            <div id="publicQrUrl" style="word-break:break-all;opacity:.85">加载中…</div>
+            <button type="button" class="btn icon-btn ghost small" id="publicQrDownload" style="margin-top:8px" title="保存二维码" aria-label="保存二维码"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0l-4-4m4 4 4-4M5 19h14"/></svg></button>
+            <div style="margin-top:16px;font-size:12.5px;opacity:.6">二维码内为当前网络下可直接访问的局域网地址，手机需与电脑处于同一网络。</div>
+          </div>
+        </div>
+        <div id="publicQrError" style="display:none;margin-top:14px;padding:10px 14px;border-radius:10px;background:rgba(217,83,79,.14);font-size:13px">二维码加载失败</div>
       </section>
     </main>
 
     <!-- 功能区：文件列表 -->
     <main id="view-files" class="view" hidden>
       <div class="view-head">
-        <button class="btn ghost small back-btn" type="button" data-back>← 返回入口</button>
+        <button class="btn icon-btn ghost small back-btn" type="button" data-back title="返回入口" aria-label="返回入口"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
         <h2>文件列表</h2>
       </div>
       <section class="card">
@@ -129,10 +163,11 @@
               <option value="type">文件类型</option>
             </select>
           </label>
-          <button id="sortOrderBtn" class="btn ghost small" type="button" data-order="desc">↓ 降序</button>
-          <button id="refreshBtn" class="btn ghost small" type="button">刷新</button>
+          <button id="sortOrderBtn" class="btn icon-btn ghost small" type="button" data-order="desc" title="切换排序方向" aria-label="切换排序方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 20V4m0 0L4 7m3-3 3 3M17 4v16m0 0-3-3m3 3 3-3"/></svg></button>
+          <button id="refreshBtn" class="btn icon-btn ghost small" type="button" title="刷新文件列表" aria-label="刷新文件列表"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></svg></button>
         </div>
         <div id="fileFilters" class="file-filters"></div>
+        <div id="fileBreadcrumb" class="file-breadcrumb"></div>
         <div id="fileSummary" class="file-summary"></div>
         <div id="fileList" class="file-list"></div>
       </section>
@@ -141,7 +176,7 @@
     <!-- 功能区：上传 -->
     <main id="view-upload" class="view" hidden>
       <div class="view-head">
-        <button class="btn ghost small back-btn" type="button" data-back>← 返回入口</button>
+        <button class="btn icon-btn ghost small back-btn" type="button" data-back title="返回入口" aria-label="返回入口"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
         <h2>上传文件</h2>
         <span id="maxSize" class="max-size"></span>
       </div>
@@ -150,7 +185,7 @@
           <div class="drop-icon">↑</div>
           <h2>拖拽文件到这里</h2>
           <p>或者点击下方按钮选择文件，支持多选</p>
-          <button id="selectBtn" class="btn primary" type="button">选择文件</button>
+          <button id="selectBtn" class="btn icon-btn primary" type="button" title="选择文件" aria-label="选择文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 17v2h16v-2"/></svg></button>
           <input id="fileInput" type="file" multiple hidden />
         </div>
         <div id="uploadQueue" class="upload-queue"></div>
@@ -160,19 +195,19 @@
     <!-- 功能区：共享文本 -->
     <main id="view-text" class="view" hidden>
       <div class="view-head">
-        <button class="btn ghost small back-btn" type="button" data-back>← 返回入口</button>
+        <button class="btn icon-btn ghost small back-btn" type="button" data-back title="返回入口" aria-label="返回入口"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
         <h2>共享文本</h2>
         <div id="sharedTextStatus" class="status">已就绪</div>
       </div>
       <section class="card text-card">
         <textarea id="sharedText" placeholder="在这里输入文字，另一端会自动同步；也可以直接粘贴内容。"></textarea>
         <div class="text-actions">
-          <button id="saveTextBtn" class="btn primary small" type="button">保存</button>
-          <button id="copyTextBtn" class="btn ghost small" type="button">复制</button>
-          <button id="pasteTextBtn" class="btn ghost small" type="button">粘贴</button>
-          <button id="refreshTextBtn" class="btn ghost small" type="button">刷新</button>
-          <button id="historyTextBtn" class="btn ghost small" type="button">历史</button>
-          <button id="clearTextBtn" class="btn danger small" type="button">清空</button>
+          <button id="saveTextBtn" class="btn icon-btn primary small" type="button" title="保存共享文本" aria-label="保存共享文本"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/></svg></button>
+          <button id="copyTextBtn" class="btn icon-btn ghost small" type="button" title="复制文本" aria-label="复制文本"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="10" height="10" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button>
+          <button id="pasteTextBtn" class="btn icon-btn ghost small" type="button" title="粘贴文本" aria-label="粘贴文本"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="5" width="12" height="15" rx="2"/><path d="M9 5V3h6v2"/></svg></button>
+          <button id="refreshTextBtn" class="btn icon-btn ghost small" type="button" title="刷新文本" aria-label="刷新文本"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></svg></button>
+          <button id="historyTextBtn" class="btn icon-btn ghost small" type="button" title="历史记录" aria-label="历史记录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 4v4h4M12 8v5l3 2"/></svg></button>
+          <button id="clearTextBtn" class="btn icon-btn danger small" type="button" title="清空文本" aria-label="清空文本"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2m-8 0 1 13h8l1-13"/></svg></button>
         </div>
       </section>
     </main>
@@ -180,7 +215,7 @@
     <!-- 功能区：服务信息 -->
     <main id="view-info" class="view" hidden>
       <div class="view-head">
-        <button class="btn ghost small back-btn" type="button" data-back>← 返回入口</button>
+        <button class="btn icon-btn ghost small back-btn" type="button" data-back title="返回入口" aria-label="返回入口"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
         <h2>服务信息</h2>
       </div>
       <section class="card info-card">
@@ -206,15 +241,13 @@
     <!-- 功能区：工具箱（回收站 / 操作日志 / 存储清理 / 扫码入口） -->
     <main id="view-more" class="view" hidden>
       <div class="view-head">
-        <button class="btn ghost small back-btn" type="button" data-back>← 返回入口</button>
+        <button class="btn icon-btn ghost small back-btn" type="button" data-back title="返回入口" aria-label="返回入口"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
         <h2>工具箱</h2>
       </div>
       <section class="card">
         <div class="v3-more-body"></div>
       </section>
     </main>
-
-    <footer>局域网文件传输 · 端口 9988 · 文件仅保存在本机上传目录</footer>
   </div>
 
   <div id="authModal" class="modal" hidden>
@@ -227,10 +260,11 @@
       </div>
       <h2>输入访问密码</h2>
       <input id="passwordInput" type="password" inputmode="numeric" autocomplete="off" placeholder="请输入访问密码" />
+      <p class="auth-hint">输入后按 Enter 即可进入</p>
       <div id="authError" class="auth-error" hidden></div>
       <div class="auth-actions">
-        <button id="authSubmitBtn" class="btn primary" type="button">验证并进入</button>
-        <button id="authCancelBtn" class="btn ghost" type="button">取消</button>
+        <button id="authSubmitBtn" class="btn icon-btn primary" type="button" title="验证并进入" aria-label="验证并进入"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13m0 0-5-5m5 5-5 5"/></svg></button>
+        <button id="authCancelBtn" class="btn icon-btn ghost" type="button" title="取消" aria-label="取消"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
       </div>
     </div>
   </div>
@@ -243,25 +277,24 @@
           <p class="section-desc">按保存时间倒序显示，最多保留 100 条。</p>
         </div>
         <div class="actions">
-          <button id="clearHistoryBtn" class="btn danger small" type="button">全部删除</button>
-          <button id="closeHistoryBtn" class="btn ghost small" type="button">关闭</button>
+          <button id="clearHistoryBtn" class="btn icon-btn danger small" type="button" title="删除全部历史" aria-label="删除全部历史"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2m-8 0 1 13h8l1-13"/></svg></button>
+          <button id="closeHistoryBtn" class="btn icon-btn ghost small" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
         </div>
       </div>
       <div id="historyList" class="history-list"></div>
     </div>
   </div>
 
-  <div id="playerModal" class="modal" hidden>
-    <div class="modal-card player-card">
-      <div class="section-head">
-        <div>
-          <h2 id="playerTitle">播放</h2>
-          <p id="playerSubtitle" class="section-desc"></p>
-        </div>
-        <button id="closePlayerBtn" class="btn ghost small" type="button">关闭</button>
-      </div>
-      <div id="playerStage" class="player-stage"></div>
+  <div id="playerModal" class="modal player-modal" hidden>
+    <div id="playerHeader" class="player-header" hidden>
+      <span id="playerTitle" class="player-title"></span>
+      <span id="playerSubtitle" class="player-subtitle"></span>
     </div>
+    <div class="player-tools">
+      <button id="printPlayerBtn" class="btn icon-btn player-tool" type="button" title="打印" aria-label="打印"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 14h12v7H6z"/></svg></button>
+      <button id="closePlayerBtn" class="btn icon-btn player-tool" type="button" title="关闭预览" aria-label="关闭预览"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div id="playerStage" class="player-stage"></div>
   </div>
 
   <div id="toast" class="toast"></div>

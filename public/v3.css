@@ -6,7 +6,8 @@
 
 /* ---------- 文件项：勾选框 + 缩略图 ---------- */
 .file-item {
-  grid-template-columns: auto 66px minmax(0, 1fr) auto;
+  grid-template-columns: auto 64px minmax(0, 1fr) auto;
+  column-gap: 15px;
 }
 
 .v3-pick-wrap {
@@ -349,6 +350,76 @@
   background: #f6f8fc;
 }
 
+/* ---------- 上传记录 ---------- */
+.v3-upload-log {
+  margin-top: 14px;
+  border-top: 1px dashed var(--border);
+  padding-top: 12px;
+}
+.v3-upload-log-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.v3-upload-log-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: #f6fdf9;
+  border: 1px solid #dcf5e6;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+}
+.v3-upload-log-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.v3-upload-log-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+.v3-upload-log-item.is-deleted {
+  background: #fff7f7;
+  border-color: #fecaca;
+}
+.v3-upload-log-item.is-deleted .v3-upload-log-name {
+  text-decoration: line-through;
+  color: #94a3b8;
+}
+.v3-upload-log-item.is-deleted .v3-upload-log-meta {
+  color: #dc2626;
+}
+
+/* ---------- 全局上传浮标（跨视图） ---------- */
+.v3-upload-badge {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 180;
+  padding: 10px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: linear-gradient(135deg, #4f46e5, #6366f1);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  box-shadow: 0 12px 30px rgba(79, 70, 229, 0.4);
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+.v3-upload-badge:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 36px rgba(79, 70, 229, 0.5);
+}
+
 #dropZone.is-dragover {
   border-color: var(--primary);
   background: #f2f4ff;
@@ -495,6 +566,7 @@
 .v3-badge.is-delete { background: #fef2f2; color: #b91c1c; }
 .v3-badge.is-cleanup { background: #fffbeb; color: #b45309; }
 .v3-badge.is-share { background: #f5f3ff; color: #6d28d9; }
+.v3-badge.is-visit { background: #eef2ff; color: #4338ca; }
 
 /* ---------- 磁盘与清理 ---------- */
 .v3-disk {
@@ -613,7 +685,7 @@
 .v3-modal-mask {
   position: fixed;
   inset: 0;
-  z-index: 300;
+  z-index: 1200;
   background: rgba(15, 23, 42, 0.42);
   backdrop-filter: blur(3px);
   display: flex;
@@ -680,6 +752,178 @@
   color: var(--primary-dark);
 }
 
+/* ---------- 统计 ---------- */
+.v3-stats-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.v3-stat-card {
+  padding: 16px 12px;
+  border-radius: 12px;
+  background: #f6f8fc;
+  border: 1px solid var(--border);
+  text-align: center;
+}
+.v3-stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--primary-dark);
+}
+.v3-stat-label {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.v3-stat-card.up .v3-stat-value { color: #047857; }
+.v3-stat-card.down .v3-stat-value { color: #1d4ed8; }
+.v3-stat-card.view .v3-stat-value { color: #b45309; }
+.v3-stat-card.login .v3-stat-value { color: #6d28d9; }
+
+.v3-stats-chart {
+  background: #fbfcff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.v3-stats-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 14px;
+}
+.v3-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  height: 150px;
+  padding-bottom: 4px;
+}
+.v3-bar-group {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+}
+.v3-bar-wrap {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 3px;
+}
+.v3-bar {
+  width: 38%;
+  min-height: 2px;
+  border-radius: 4px 4px 0 0;
+  transition: height 0.3s ease;
+}
+.v3-bar.up { background: #10b981; }
+.v3-bar.down { background: #3b82f6; }
+.v3-bar-label {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.v3-legend {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.v3-legend span::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+.v3-legend .up::before { background: #10b981; }
+.v3-legend .down::before { background: #3b82f6; }
+
+.v3-login-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  font-size: 12.5px;
+}
+.v3-login-label {
+  flex: 0 0 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.v3-login-track {
+  flex: 1;
+  height: 10px;
+  border-radius: 5px;
+  background: #eef2f7;
+  overflow: hidden;
+}
+.v3-login-fill {
+  height: 100%;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
+}
+.v3-login-count {
+  flex: 0 0 32px;
+  text-align: right;
+  font-weight: 600;
+  color: var(--primary-dark);
+}
+
+.v3-hot-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+.v3-hot-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 12px;
+}
+.v3-hot-name {
+  flex: 0 0 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.v3-hot-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: #eef2f7;
+  overflow: hidden;
+}
+.v3-hot-fill {
+  height: 100%;
+  border-radius: 4px;
+}
+.v3-hot-fill.view { background: #f59e0b; }
+.v3-hot-fill.download { background: #3b82f6; }
+.v3-hot-fill.share { background: #8b5cf6; }
+.v3-hot-count {
+  flex: 0 0 26px;
+  text-align: right;
+  font-weight: 600;
+  color: var(--primary-dark);
+}
+
 /* ---------- 移动端适配 ---------- */
 @media (max-width: 640px) {
   .file-item {
@@ -735,6 +979,16 @@
     flex-wrap: wrap;
   }
 
+  .v3-stats-cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .v3-login-label {
+    flex-basis: 120px;
+  }
+  .v3-hot-grid {
+    grid-template-columns: 1fr;
+  }
+
   .v3-row .btn {
     flex: 0 0 auto;
   }
@@ -774,5 +1028,15 @@
 
   .v3-upload-actions .btn {
     flex: 1 1 auto;
+  }
+}
+
+/* 触屏设备没有 hover，操作按钮保持可见，避免功能不可达 */
+@media (hover: none), (pointer: coarse) {
+  .file-actions .action-btn,
+  .file-actions .v3-share {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
   }
 }

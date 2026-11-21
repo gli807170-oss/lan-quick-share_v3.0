@@ -5,13 +5,18 @@ import path from 'node:path'
 import crypto, { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { buildAccessUrls, isLocalAddress, pickBestLanUrl } from './ip-view.mjs'
-import { attachV3, moveToTrash, noteDownload, logAction } from './v3.mjs'
+import {
+  attachV3, moveToTrash, noteDownload, logAction, streamDirectoryZip,
+  describeDevice, writeDetailLog, writeStartupLog
+} from './v3.mjs'
+import { createThumbService } from './thumb.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const CONFIG_FILE = path.join(__dirname, 'config.json')
 const UPLOAD_DIR = path.join(__dirname, 'uploads')
 const PUBLIC_DIR = path.join(__dirname, 'public')
 const SHARED_TEXT_FILE = path.join(UPLOAD_DIR, '.shared-text.txt')
+const thumbs = createThumbService({ uploadDir: UPLOAD_DIR })
 const HISTORY_FILE = path.join(__dirname, 'shared-text-history.json')
 const MAX_HISTORY = 100
 
@@ -73,6 +78,9 @@ const IMAGE_TYPES = {
   svg: 'image/svg+xml',
   avif: 'image/avif'
 }
+const DOC_TYPES = {
+  pdf: 'application/pdf'
+}
 
 function extOf(name) {
   return path.extname(name).slice(1).toLowerCase()
@@ -83,12 +91,13 @@ function mediaTypeOf(name) {
   if (VIDEO_TYPES[ext]) return 'video'
   if (AUDIO_TYPES[ext]) return 'audio'
   if (IMAGE_TYPES[ext]) return 'image'
+  if (DOC_TYPES[ext]) return 'doc'
   return 'file'
 }
 
 function mimeOf(name) {
   const ext = extOf(name)
-  return VIDEO_TYPES[ext] || AUDIO_TYPES[ext] || IMAGE_TYPES[ext] || null
+  return VIDEO_TYPES[ext] || AUDIO_TYPES[ext] || IMAGE_TYPES[ext] || DOC_TYPES[ext] || null
 }
 
 function displayNameOf(name) {
@@ -98,6 +107,18 @@ function displayNameOf(name) {
   const dir = index >= 0 ? value.slice(0, index + 1) : ''
   const base = index >= 0 ? value.slice(index + 1) : value
   return dir + base.replace(/^\d{4}-\d{2}-\d{2}T[\w-]+-[\w-]+-/, '')
+}
+
+// HTTP 头只能是 Latin-1；非 ASCII 文件名只放进 filename*，filename 用安全的 ASCII 回退
+function asciiHeaderName(name) {
+  const value = String(name || '').replace(/[\r\n]/g, '_')
+  const ascii = value.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, "'").trim()
+  return ascii || 'file'
+}
+
+function inlineDisposition(name) {
+  const shown = displayNameOf(name)
+  return `inline; filename="${asciiHeaderName(shown)}"; filename*=UTF-8''${encodeURIComponent(shown)}`
 }
 
 function formatLimit(bytes) {
@@ -174,6 +195,12 @@ function requireAuth(req, res, next) {
   res.status(401).json({ code: 'UNAUTHORIZED', message: '需要先验证访问密码' })
 }
 
+// 删除文件 / 共享文本等破坏性操作仅允许服务器本机 IP
+function requireLocal(req, res, next) {
+  if (isLocalAddress(req.socket?.remoteAddress)) return next()
+  res.status(403).json({ code: 'LOCAL_ONLY', message: '该操作仅允许在服务器本机执行' })
+}
+
 // 定期清理过期会话，避免内存长期增长
 const sessionTimer = setInterval(() => {
   const now = Date.now()
@@ -204,6 +231,29 @@ const upload = multer({
 
 const app = express()
 app.disable('x-powered-by')
+
+// 详细访问日志：记录所有设备及 IP 的访问动作，统一归档到 LOG/detail-log.jsonl
+app.use((req, res, next) => {
+  const started = Date.now()
+  res.on('finish', () => {
+    const rawIp = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '')
+    const ua = String(req.headers['user-agent'] || '').replace(/\s+/g, ' ').trim()
+    writeDetailLog({
+      ts: Date.now(),
+      action: 'visit',
+      ip: rawIp,
+      ua: ua.slice(0, 300),
+      device: describeDevice(ua),
+      local: isLocalAddress(req.socket?.remoteAddress),
+      method: req.method,
+      path: String(req.originalUrl || req.url || '').split('?')[0].slice(0, 500),
+      status: res.statusCode,
+      ms: Date.now() - started
+    })
+  })
+  next()
+})
+
 app.use(express.json({ limit: '2mb' }))
 app.use(express.static(PUBLIC_DIR))
 
@@ -217,12 +267,15 @@ function fileInfo(name, stats) {
     mediaType,
     mime: mimeOf(name),
     url: `/files/${encodeURIComponent(name)}`,
-    streamUrl: mediaType === 'file' ? null : `/media/${encodeURIComponent(name)}`
+    streamUrl: mediaType === 'file' ? null : `/media/${encodeURIComponent(name)}`,
+    thumbUrl: mediaType === 'video'
+      ? `/api/thumb/${encodeURIComponent(name)}?sign=${directSign(name)}`
+      : null
   }
 }
 
 function listFiles() {
-  // 支持文件夹上传：递归遍历上传目录，跳过 . 开头的内部目录/文件与共享文本文件
+  // 支持文件夹上传：保留 .ignore 等点文件，仅跳过共享文本与隐藏目录
   const results = []
   const sharedBase = path.basename(SHARED_TEXT_FILE)
 
@@ -236,9 +289,9 @@ function listFiles() {
     }
     for (const entry of entries) {
       const name = entry.name
-      if (!name || name.startsWith('.')) continue
+      if (!name || name === sharedBase) continue
+      if (entry.isDirectory() && name.startsWith('.')) continue
       const rel = relPrefix ? `${relPrefix}/${name}` : name
-      if (!relPrefix && name === sharedBase) continue
       const abs = path.join(dir, name)
       if (entry.isDirectory()) {
         walk(abs, rel, depth + 1)
@@ -260,7 +313,7 @@ function resolveUploadFile(name) {
   const parts = raw.split('/').filter(part => part && part !== '.')
   if (!parts.length) return null
   for (const part of parts) {
-    if (part === '..' || part.startsWith('.')) return null
+    if (part === '..' || part === '.') return null
   }
   const abs = path.resolve(UPLOAD_DIR, parts.join('/'))
   if (abs === UPLOAD_DIR || !abs.startsWith(UPLOAD_DIR + path.sep)) return null
@@ -345,6 +398,12 @@ app.post('/api/auth/login', (req, res) => {
   const expiresAt = now + SESSION_TTL_MS
   sessions.set(token, { expiresAt })
   res.setHeader('Set-Cookie', authCookie(token, Math.floor(SESSION_TTL_MS / 1000)))
+  const loginUa = String(req.headers['user-agent'] || '').replace(/\s+/g, ' ').trim()
+  logAction(req, 'login', {
+    device: describeDevice(loginUa),
+    ua: loginUa.slice(0, 300),
+    local: isLocalAddress(req.socket?.remoteAddress)
+  })
   res.json({ ok: true, expiresAt })
 })
 
@@ -396,7 +455,7 @@ function directSign(name) {
 function directNameOf(req) {
   // app.use('/files') 会改写 req.url/req.path，必须用 originalUrl 才能还原完整相对路径
   const raw = String(req.originalUrl || req.url || '').split('?')[0]
-  const match = raw.match(/^\/(?:files|media)\/(.+)$/)
+  const match = raw.match(/^\/(?:files|media|api\/thumb)\/(.+)$/)
   if (!match) return ''
   try {
     return decodeURIComponent(match[1]).replace(/\\/g, '/')
@@ -416,8 +475,8 @@ function hasValidDirectSign(req) {
 
 app.use(['/api/files', '/api/shared-text', '/api/upload'], requireAuth)
 
-// /files 与 /media：带合法签名时放行，否则走密码校验
-app.use(['/files', '/media'], (req, res, next) => {
+// /files、/media、/api/thumb：带合法签名时放行，否则走密码校验
+app.use(['/files', '/media', '/api/thumb'], (req, res, next) => {
   if (hasValidDirectSign(req)) return next()
   return requireAuth(req, res, next)
 })
@@ -446,6 +505,24 @@ app.get('/api/files', (req, res) => {
   }
   const files = listFiles().sort((a, b) => (comparators[sort] || comparators.time)(a, b) * order)
   res.json({ files, sort, order: order === 1 ? 'asc' : 'desc' })
+})
+
+// 视频缩略图：服务端抽帧并按 文件标识+大小+修改时间 缓存，命中后直接返回静态 JPEG
+app.get('/api/thumb/*', async (req, res) => {
+  const name = String(req.params[0] || '').replace(/\\/g, '/')
+  const filePath = resolveUploadFile(name)
+  if (!filePath || mediaTypeOf(name) !== 'video') return res.status(404).end()
+  let stats
+  try {
+    stats = fs.statSync(filePath)
+  } catch {
+    return res.status(404).end()
+  }
+  const out = await thumbs.ensureThumb(filePath, name, stats)
+  if (!out) return res.status(404).end()
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+  res.type('image/jpeg')
+  res.sendFile(out)
 })
 
 app.get('/api/shared-text', (_req, res) => {
@@ -482,17 +559,17 @@ app.put('/api/shared-text', (req, res) => {
   res.json({ ok: true, updatedAt: Date.now() })
 })
 
-app.delete('/api/shared-text', (_req, res) => {
+app.delete('/api/shared-text', requireLocal, (_req, res) => {
   writeSharedText('')
   res.json({ ok: true })
 })
 
-app.delete('/api/shared-text/history', (_req, res) => {
+app.delete('/api/shared-text/history', requireLocal, (_req, res) => {
   writeHistory([])
   res.json({ ok: true, cleared: true })
 })
 
-app.delete('/api/shared-text/history/:id', (req, res) => {
+app.delete('/api/shared-text/history/:id', requireLocal, (req, res) => {
   const targetId = String(req.params.id || '')
   const history = readHistory()
   const nextHistory = history.filter(item => String(item?.id || '') !== targetId)
@@ -533,12 +610,23 @@ app.get('/files/*', (req, res) => {
   if (!filePath) {
     return res.status(400).send('非法文件名')
   }
-  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-    return res.status(404).send('文件不存在')
-  }
+  let stat = null
+  try { stat = fs.statSync(filePath) } catch {}
+  if (!stat) return res.status(404).send('文件不存在')
+
   noteDownload(req, name)
   res.setTimeout(0)
-  res.download(filePath, displayNameOf(name))
+  if (stat.isDirectory()) {
+    if (String(req.query.zip || '') !== '1') {
+      return res.status(400).send('文件夹请使用打包下载链接')
+    }
+    const zipTmpDir = path.join(__dirname, 'data', 'zip-tmp')
+    if (!streamDirectoryZip(req, res, filePath, path.basename(name), zipTmpDir)) {
+      return res.status(404).send('文件夹为空或不存在')
+    }
+    return
+  }
+  res.download(filePath, displayNameOf(name), { dotfiles: "allow" })
 })
 
 // 内联播放通道：Content-Disposition 为 inline，配合 send 模块的 Range 支持实现拖动进度
@@ -554,23 +642,22 @@ app.get('/media/*', (req, res) => {
   noteDownload(req, name)
 
   const mime = mimeOf(name)
-  const showName = displayNameOf(name).replace(/"/g, "'")
   const headers = {
-    'Content-Disposition': `inline; filename="${showName}"; filename*=UTF-8''${encodeURIComponent(showName)}`,
+    'Content-Disposition': inlineDisposition(name),
     'Cache-Control': 'public, max-age=3600',
     'Accept-Ranges': 'bytes'
   }
   if (mime) headers['Content-Type'] = mime
 
   res.setTimeout(0)
-  res.sendFile(filePath, { headers, acceptRanges: true }, err => {
+  res.sendFile(filePath, { headers, acceptRanges: true, dotfiles: "allow" }, err => {
     if (!err) return
     if (err.code === 'ECONNABORTED' || res.headersSent) return
     if (!res.headersSent) res.status(err.status || 404).end()
   })
 })
 
-app.delete('/api/files/:name', async (req, res) => {
+app.delete('/api/files/:name', requireLocal, async (req, res) => {
   const name = String(req.params.name || '').replace(/\\/g, '/')
   const filePath = resolveUploadFile(name)
   if (!filePath) {
@@ -624,6 +711,18 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`Upload dir: ${UPLOAD_DIR}`)
   console.log(`Max file size: ${formatLimit(MAX_FILE_SIZE)}`)
   console.log(`Access gate: password required for /api/files, /api/upload, /api/shared-text, /files, /media`)
+  writeStartupLog({
+    action: 'startup',
+    ts: Date.now(),
+    version: 'V3.0',
+    pid: process.pid,
+    host: HOST,
+    port: PORT,
+    urls: lanUrls(),
+    uploadDir: UPLOAD_DIR,
+    maxFileSize: MAX_FILE_SIZE,
+    node: process.version
+  })
 })
 
 // Node 18+ 默认 requestTimeout 为 5 分钟，20GB 上传/大文件下载必须放开
