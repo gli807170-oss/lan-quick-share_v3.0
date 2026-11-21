@@ -12,6 +12,7 @@ shared-text-history.json
 *.log
 *.tmp
 *.corrupt-*
+LOG/
 
 # npm 调试日志
 npm-debug.log*
